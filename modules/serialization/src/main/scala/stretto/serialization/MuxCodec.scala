@@ -43,15 +43,15 @@ object MuxCodec:
 
   /** Codec for the 8-byte mux header. */
   val muxHeaderCodec: Codec[MuxHeader] =
-    (codecs.uint32 ~ codecs.uint16 ~ codecs.uint16).xmap(
-      { case ((time, protoWord), len) =>
+    (codecs.uint32 :: codecs.uint16 :: codecs.uint16).xmap(
+      { case time *: protoWord *: len *: EmptyTuple =>
         val isResp  = (protoWord & 0x8000) != 0
         val protoId = protoWord & 0x7fff
         MuxHeader(time, protoId, isResp, len)
       },
       { hdr =>
         val protoWord = hdr.miniProtocolId | (if hdr.isResponse then 0x8000 else 0)
-        ((hdr.transmissionTime, protoWord), hdr.payloadLength)
+        hdr.transmissionTime *: protoWord *: hdr.payloadLength *: EmptyTuple
       }
     )
 

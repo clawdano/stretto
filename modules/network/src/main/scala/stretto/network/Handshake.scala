@@ -80,9 +80,10 @@ object HandshakeMessage:
     else
       // Read outer array tag
       val firstByte = bytes(0) & 0xff
-      if firstByte < 0x80 || firstByte > 0x9f then Left(s"expected CBOR array, got 0x${bytes(0).toHexString}")
+      if firstByte < 0x80 || firstByte > 0x9f then
+        Left(s"expected CBOR array, got 0x${String.format("%02x", bytes(0))}")
       else
-        val (arrayLen, afterArrayHdr) =
+        val (_, afterArrayHdr) =
           if (firstByte & 0x1f) < 24 then ((firstByte & 0x1f).toLong, 1)
           else (bytes(1).toLong & 0xff, 2)
 

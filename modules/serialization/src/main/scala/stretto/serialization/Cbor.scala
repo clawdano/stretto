@@ -198,7 +198,7 @@ object Cbor:
 
   /** Codec for a CBOR map of known length with homogeneous key/value codecs. */
   def cborMap[K, V](keyCodec: Codec[K], valueCodec: Codec[V]): Codec[Vector[(K, V)]] =
-    val pairCodec: Codec[(K, V)] = keyCodec ~ valueCodec
+    val pairCodec: Codec[(K, V)] = (keyCodec :: valueCodec).as[(K, V)]
     codec[Vector[(K, V)]](
       vec =>
         for
