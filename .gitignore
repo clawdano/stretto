@@ -1,0 +1,26 @@
+# IDE
+.idea/
+.vscode/
+*.iml
+.bsp/
+metals.sbt
+.metals/
+.bloop/
+
+# sbt
+target/
+project/target/
+project/project/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+*.pem
+*.key
+
+# Node data
+data/
+db/
