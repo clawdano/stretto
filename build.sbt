@@ -59,8 +59,8 @@ lazy val serialization = project
   .settings(
     name := "stretto-serialization",
     libraryDependencies ++= Seq(
-      // bloxbean cardano-client-lib for CBOR types
-      "com.bloxbean.cardano" % "cardano-client-lib" % "0.6.3",
+      "org.scodec" %% "scodec-bits" % scodecBitsVersion,
+      "org.scodec" %% "scodec-core" % scodecCoreVersion,
     ),
   )
 
@@ -73,8 +73,6 @@ lazy val network = project
     libraryDependencies ++= Seq(
       "co.fs2" %% "fs2-core" % fs2Version,
       "co.fs2" %% "fs2-io" % fs2Version,
-      // bloxbean yaci for miniprotocols
-      "com.bloxbean.cardano" % "yaci-core" % "0.3.0-beta5",
     ),
   )
 
