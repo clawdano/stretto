@@ -11,10 +11,13 @@
 - **CI:** GitHub Actions
 
 ## Key Dependencies (JVM Ecosystem)
-- **bloxbean/yaci** — Ouroboros miniprotocol implementation (Java, use via interop)
-- **bloxbean/cardano-client-lib** — CBOR serialization, Cardano types (Java)
 - **nau/scalus** — Plutus script evaluation (Scala 3, native)
-- Additional Scala libraries: cats-effect 3 (IO), fs2 (streaming), scodec (binary), http4s (metrics/API)
+- **scodec** — Binary codec primitives for CBOR and mux framing
+- **cats-effect 3** — Asynchronous effect system (IO)
+- **fs2** — Functional streaming and TCP networking
+- **http4s** — Metrics and API server
+
+> Ouroboros miniprotocols and CBOR codecs are implemented from scratch in pure Scala.
 
 ## Project Structure
 ```

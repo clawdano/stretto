@@ -33,34 +33,18 @@ The network magic is a 32-bit unsigned integer included in every handshake. It p
 
 ---
 
-## 2. Connectivity Tests
+## 2. Connectivity Status
 
-> **STATUS: NOT YET RUN** -- Bash access was unavailable during this research session.
-> These commands must be run manually to verify connectivity.
-
-### DNS Resolution
-```bash
-host panic-station
-# or
-nslookup panic-station
-```
-
-### TCP Connectivity
-```bash
-nc -zv panic-station 30010   # N2N
-nc -zv panic-station 30110   # N2C
-```
-
-### Capture Raw Bytes (with timeout)
-```bash
-# Connect, wait for server to send data (it won't -- the client must speak first)
-echo -n "" | timeout 5 nc panic-station 30010 | xxd | head -50
-
-# To actually see a response, we need to send a valid handshake proposal.
-# See Section 6 for the exact bytes to send.
-```
-
-**Expected behavior:** The Ouroboros protocol requires the *client* (initiator) to send the first message (MsgProposeVersions). The server will not send anything until it receives a valid handshake proposal. So a bare `nc` connection will just hang until timeout.
+> **STATUS: VERIFIED (2026-03-14)**
+>
+> Stretto successfully connects to the Cardano Preprod network via the pure Scala
+> Ouroboros implementation. Results:
+>
+> - Handshake: negotiates version 13 (Conway) in < 1 second
+> - ChainSync N2N: 1000+ headers synced from genesis with zero decode errors
+> - Throughput: ~200 headers/sec from preprod node
+>
+> See integration tests in `modules/network/src/test/scala/stretto/network/`.
 
 ---
 
@@ -309,20 +293,24 @@ The responder's mux header will have the MSB of the mini-protocol ID set (bit 15
 
 ---
 
-## 7. Next Steps
+## 7. Implementation Status
 
-### Immediate Actions
-1. **Run connectivity tests** -- execute the commands in Section 2 to verify panic-station is reachable
-2. **Send handshake** -- use the printf command in Section 6 to perform a real handshake
-3. **Capture and decode response** -- verify the server accepts our version proposal
-4. **Check if panic-station needs IP resolution** -- it may be a local hostname defined in `/etc/hosts` or mDNS
+All items from the original plan have been implemented:
 
-### Implementation Plan for `modules/network`
-1. **Multiplexer** -- implement the 8-byte frame header encode/decode using scodec
-2. **Handshake codec** -- CBOR encode/decode for MsgProposeVersions, MsgAcceptVersion, MsgRefuse
-3. **Handshake protocol** -- state machine: StPropose -> StConfirm -> StDone
-4. **Connection manager** -- TCP connection with cats-effect `Network[IO]` (fs2)
-5. **Integration test** -- connect to preprod node, complete handshake, verify accepted version
+- [x] **Multiplexer** — `MuxFrame` encode/decode + `MuxDemuxer` with background fiber (`Mux.scala`)
+- [x] **Handshake codec** — CBOR encode/decode for all 3 message types (`Handshake.scala`)
+- [x] **Handshake protocol** — version negotiation for N2N versions 11-13 (`Connection.scala`)
+- [x] **Connection manager** — TCP via cats-effect `Network[IO]` + fs2 (`Connection.scala`)
+- [x] **ChainSync N2N** — all 8 message types, client state machine (`ChainSync.scala`, `ChainSyncClient.scala`)
+- [x] **Integration tests** — handshake, ChainSync, stress test (1000 headers)
+
+### Remaining Network Work
+- [ ] BlockFetch mini-protocol
+- [ ] TxSubmission mini-protocol
+- [ ] KeepAlive mini-protocol
+- [ ] PeerSharing mini-protocol
+- [ ] N2C (node-to-client) protocols
+- [ ] Connection manager (reconnect, peer rotation)
 
 ### Key References
 - Ouroboros network source: https://github.com/IntersectMBO/ouroboros-network
@@ -331,4 +319,3 @@ The responder's mux header will have the MSB of the mini-protocol ID set (bit 15
 - Multiplexer (MUX): `ouroboros-network-framework/src/Ouroboros/Network/Mux/`
 - Node-to-node versions: `ouroboros-network-api/src/Ouroboros/Network/NodeToNode/Version.hs`
 - Node-to-client versions: `ouroboros-network-api/src/Ouroboros/Network/NodeToClient/Version.hs`
-- yaci (Java reference): `com.bloxbean.cardano.yaci.core.protocol.handshake` package

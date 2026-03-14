@@ -1,26 +1,26 @@
-# Stretto 🎵
+# Stretto
 
 ### A Cardano Full Node in Scala 3
 
 > *In music, a **stretto** is where multiple voices converge, overlapping and reinforcing each other toward resolution — much like nodes reaching consensus.*
 
-**Status:** Research & Planning Phase
+**Status:** Early Implementation — network layer operational, syncing headers from live Cardano nodes
 
 ## Vision
 
 Stretto is an independent Cardano node implementation written in Scala 3, targeting full spec compliance with the Haskell reference node. The project aims to:
 
 - Provide the Cardano community with another independent node implementation
-- Leverage the JVM ecosystem's existing Cardano libraries (yaci, cardano-client-lib, scalus)
+- Leverage the JVM ecosystem (scalus for Plutus, scodec for binary, cats-effect/fs2 for streaming)
 - Demonstrate that a production-grade blockchain node can be vibe-coded with AI assistance
 - Strengthen network resilience through client diversity
 
 ## Why Scala?
 
-- **JVM interop** — direct access to Java Cardano libraries (bloxbean's yaci for miniprotocols, cardano-client-lib for CBOR/types)
-- **Native Plutus evaluation** — scalus provides a Scala 3 Plutus Core evaluator (CEK machine)
 - **Type system** — ADTs, pattern matching, and opaque types are natural for modeling ledger rules and protocol state machines
+- **Native Plutus evaluation** — scalus provides a Scala 3 Plutus Core evaluator (CEK machine)
 - **Performance** — JVM with Java 21 virtual threads, modern GC, mature JIT
+- **Effect system** — cats-effect + fs2 for safe concurrency and streaming
 - **Unique lineage** — no existing Scala node implementation, ensuring originality
 
 ## Architecture
@@ -34,33 +34,46 @@ Stretto is an independent Cardano node implementation written in Scala 3, target
 ├──────────┴──────────┴──────────┴────────────────┤
 │              Storage (ChainDB)                   │
 ├──────────────────────────────────────────────────┤
-│           Core (Types, Crypto, CBOR)             │
+│        Core (Types) + Serialization (CBOR)       │
 └──────────────────────────────────────────────────┘
-
-External JVM Dependencies:
-  ├── yaci (miniprotocols, block decoding)
-  ├── cardano-client-lib (CBOR, Cardano types)
-  └── scalus (Plutus evaluation)
 ```
 
 ## Key Dependencies
 
 | Library | Language | Purpose |
 |---------|----------|---------|
-| [yaci](https://github.com/bloxbean/yaci) | Java | Ouroboros miniprotocols (N2N, N2C), block CBOR decoding |
-| [cardano-client-lib](https://github.com/bloxbean/cardano-client-lib) | Java | CBOR serialization, Cardano types, address handling |
 | [scalus](https://github.com/nau/scalus) | Scala 3 | Plutus V1/V2/V3 script evaluation (CEK machine) |
-| [cats-effect](https://typelevel.org/cats-effect/) | Scala 3 | Asynchronous effect system |
-| [fs2](https://fs2.io/) | Scala 3 | Functional streaming |
+| [scodec](https://scodec.org/) | Scala 3 | Binary codec primitives for CBOR and mux framing |
+| [cats-effect](https://typelevel.org/cats-effect/) | Scala 3 | Asynchronous effect system (IO) |
+| [fs2](https://fs2.io/) | Scala 3 | Functional streaming and TCP networking |
+| [http4s](https://http4s.org/) | Scala 3 | Metrics and API server |
+
+> Ouroboros miniprotocols (Handshake, ChainSync, BlockFetch) and CBOR codecs are implemented from scratch in pure Scala — no external Cardano Java libraries.
+
+## Progress
+
+See **[ROADMAP.md](ROADMAP.md)** for detailed progress tracking.
+
+| Module | Status | Highlights |
+|--------|--------|------------|
+| **core** | :white_check_mark: Complete | All domain types with 79 unit tests |
+| **serialization** | :white_check_mark: Complete | CBOR primitives, Cardano codecs, mux codec |
+| **network** | :white_check_mark: Operational | Handshake + ChainSync N2N verified against live preprod node |
+| **storage** | :construction: Next | RocksDB-backed chain store |
+| **consensus** | :x: Planned | Ouroboros Praos, chain selection |
+| **ledger** | :x: Planned | UTxO model, tx validation, all eras |
+| **mempool** | :x: Planned | Transaction pool |
+| **node** | :x: Planned | Main assembly, orchestration |
+| **cli** | :x: Planned | Command-line interface |
 
 ## Milestones
 
 | # | Milestone | Description | Status |
 |---|-----------|-------------|--------|
-| M0 | Project Setup | Build, CI, project skeleton | Planned |
-| M1 | Core Types | Primitives, CBOR serialization (all eras) | Planned |
-| M2 | Network Sync | Connect to peers, sync headers via yaci | Planned |
-| M3 | Chain Storage | Download and persist blocks | Planned |
+| M0 | Project Setup | Build, CI, project skeleton | :white_check_mark: Complete |
+| M1 | Core Types | Primitives, CBOR serialization (all eras) | :white_check_mark: Complete |
+| M2 | Network Sync | Connect to peers, sync headers | :yellow_circle: In Progress |
+| M3 | Chain Storage | Download and persist blocks | :construction: Next |
 | M4 | Ledger (Shelley) | UTxO tracking, basic validation | Planned |
 | M5 | Multi-Era Ledger | Allegra → Conway validation rules | Planned |
 | M6 | Consensus | Ouroboros Praos, chain selection | Planned |
@@ -87,7 +100,7 @@ Conformance with the Haskell node is our top priority. We employ:
 | [Dingo](https://github.com/blinklabs-io/dingo) | Go | Blink Labs | Active development |
 | [Torsten](https://github.com/michaeljfazio/torsten) | Rust | Sandstone Pool | Alpha |
 | [Acropolis](https://github.com/input-output-hk/acropolis) | Rust | IOG | In development |
-| **Stretto** | **Scala 3** | **Clawdano** | **Research phase** |
+| **Stretto** | **Scala 3** | **Clawdano** | **Early implementation** |
 
 ## Vibe-Coded
 

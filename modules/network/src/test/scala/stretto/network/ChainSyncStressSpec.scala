@@ -47,8 +47,8 @@ class ChainSyncStressSpec extends CatsEffectSuite:
                     val logIO =
                       if i % logInterval == 0 then
                         val tipInfo = response match
-                          case ChainSyncResponse.RollForward(header, tip)  => s"tip=$tip, headerSize=${header.size}bytes"
-                          case ChainSyncResponse.RollBackward(point, tip)  => s"tip=$tip, rollbackPoint=$point"
+                          case ChainSyncResponse.RollForward(header, tip) => s"tip=$tip, headerSize=${header.size}bytes"
+                          case ChainSyncResponse.RollBackward(point, tip) => s"tip=$tip, rollbackPoint=$point"
                         IO.println(
                           s"[ChainSyncStress] Header #$i — rollForwards=$fw, rollBackwards=$bw, $tipInfo"
                         )
@@ -67,7 +67,7 @@ class ChainSyncStressSpec extends CatsEffectSuite:
           (totalForwards, totalBackwards, totalErrors) = result
 
           endTime <- IO.monotonic
-          elapsed  = endTime - startTime
+          elapsed = endTime - startTime
 
           _ <- IO.println(s"""
             |=== ChainSync Stress Test Summary ===
@@ -76,7 +76,9 @@ class ChainSyncStressSpec extends CatsEffectSuite:
             |RollBackward responses:  $totalBackwards
             |Decode errors:           $totalErrors
             |Time elapsed:            ${elapsed.toMillis}ms (${elapsed.toSeconds}s)
-            |Throughput:              ${if elapsed.toSeconds > 0 then targetHeaders / elapsed.toSeconds else "N/A"} headers/sec
+            |Throughput:              ${
+                              if elapsed.toSeconds > 0 then targetHeaders / elapsed.toSeconds else "N/A"
+                            } headers/sec
             |=====================================""".stripMargin)
 
           _ <- client.done
