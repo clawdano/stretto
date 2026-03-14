@@ -143,4 +143,10 @@ lazy val cli = project
   .settings(commonSettings)
   .settings(
     name := "stretto-cli",
+    Compile / mainClass := Some("stretto.cli.Main"),
+    Compile / run / fork := true,
+    libraryDependencies ++= Seq(
+      "org.typelevel" %% "log4cats-slf4j" % log4catsVersion,
+      "ch.qos.logback" % "logback-classic" % logbackVersion % Runtime,
+    ),
   )

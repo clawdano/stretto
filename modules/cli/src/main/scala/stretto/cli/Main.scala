@@ -1,0 +1,197 @@
+package stretto.cli
+
+import cats.effect.{ExitCode, IO, IOApp}
+import cats.syntax.all.*
+import org.typelevel.log4cats.slf4j.Slf4jLogger
+import stretto.node.{NetworkPreset, SyncPipeline}
+
+import java.nio.file.{Path, Paths}
+
+/** Stretto CLI — command-line interface for the Cardano node. */
+object Main extends IOApp:
+
+  private val logger = Slf4jLogger.getLoggerFromName[IO]("stretto.cli")
+
+  override def run(args: List[String]): IO[ExitCode] =
+    args match
+      case "sync-headers" :: rest => runSyncHeaders(rest)
+      case "version" :: _         => IO.println("stretto 0.1.0-SNAPSHOT") *> IO.pure(ExitCode.Success)
+      case "help" :: _ | Nil      => printUsage *> IO.pure(ExitCode.Success)
+      case unknown :: _ =>
+        IO.println(s"Unknown command: $unknown. Run 'stretto help' for usage.") *> IO.pure(ExitCode(2))
+
+  private def runSyncHeaders(args: List[String]): IO[ExitCode] =
+    parseArgs(args, SyncHeadersConfig()) match
+      case Left(err) =>
+        IO.println(s"Error: $err") *> IO.println("") *> printSyncHeadersUsage *> IO.pure(ExitCode(2))
+      case Right(config) =>
+        resolveConfig(config).flatMap {
+          case Left(err) =>
+            IO.println(s"Error: $err") *> IO.pure(ExitCode(2))
+          case Right(resolved) =>
+            executeSyncHeaders(resolved)
+        }
+
+  private def executeSyncHeaders(config: ResolvedConfig): IO[ExitCode] =
+    for
+      _         <- logger.info(s"Stretto — Cardano header sync")
+      _         <- logger.info(s"Network: ${config.networkName} (magic ${config.networkMagic})")
+      _         <- logger.info(s"Peer: ${config.host}:${config.port}")
+      _         <- logger.info(s"Database: ${config.dbPath}")
+      _         <- if config.maxHeaders > 0 then logger.info(s"Max headers: ${config.maxHeaders}") else IO.unit
+      startTime <- IO.monotonic
+      result <- SyncPipeline
+        .sync(
+          host = config.host,
+          port = config.port,
+          networkMagic = config.networkMagic,
+          dbPath = config.dbPath,
+          maxHeaders = config.maxHeaders,
+          onProgress = progress =>
+            for
+              elapsed <- IO.monotonic.map(now => (now - startTime).toSeconds.max(1))
+              rate = progress.headersStored.toDouble / elapsed.toDouble
+              pct =
+                if progress.peerTipBlock.blockNoValue > 0 then
+                  f"${progress.headersStored.toDouble / progress.peerTipBlock.blockNoValue * 100}%.1f%%"
+                else "N/A"
+              _ <- logger.info(
+                s"Progress: ${progress.headersStored} headers " +
+                  s"(slot ${progress.currentSlot.value}, $pct) " +
+                  f"@ $rate%.0f hdr/s" +
+                  s" | tip: slot ${progress.peerTipSlot.value} block ${progress.peerTipBlock.blockNoValue}" +
+                  (if progress.rollbacks > 0 then s" | rollbacks: ${progress.rollbacks}" else "") +
+                  (if progress.parseErrors > 0 then s" | errors: ${progress.parseErrors}" else "")
+              )
+            yield ()
+        )
+        .handleErrorWith { err =>
+          logger.error(err)(s"Sync failed: ${err.getMessage}") *>
+            IO.pure(
+              SyncPipeline.SyncProgress(
+                0L,
+                0L,
+                0L,
+                stretto.core.Types.SlotNo(0L),
+                stretto.core.Types.SlotNo(0L),
+                stretto.core.Types.BlockNo(0L)
+              )
+            )
+        }
+      elapsed <- IO.monotonic.map(now => (now - startTime).toSeconds)
+      _ <- logger.info(
+        s"Sync complete: ${result.headersStored} headers in ${elapsed}s" +
+          s" (${result.rollbacks} rollbacks, ${result.parseErrors} errors)"
+      )
+    yield if result.parseErrors > 0 then ExitCode(1) else ExitCode.Success
+
+  // --- Config types ---
+
+  private case class SyncHeadersConfig(
+      network: Option[String] = None,
+      host: Option[String] = None,
+      port: Option[Int] = None,
+      dbPath: Option[String] = None,
+      maxHeaders: Long = 0L,
+      networkMagic: Option[Long] = None
+  )
+
+  private case class ResolvedConfig(
+      networkName: String,
+      networkMagic: Long,
+      host: String,
+      port: Int,
+      dbPath: Path,
+      maxHeaders: Long
+  )
+
+  // --- Arg parsing ---
+
+  private def parseArgs(args: List[String], config: SyncHeadersConfig): Either[String, SyncHeadersConfig] =
+    args match
+      case Nil => Right(config)
+      case ("--network" | "-n") :: value :: rest =>
+        parseArgs(rest, config.copy(network = Some(value)))
+      case ("--peer" | "-p") :: value :: rest =>
+        parsePeer(value).flatMap { case (h, p) =>
+          parseArgs(rest, config.copy(host = Some(h), port = Some(p)))
+        }
+      case ("--db" | "-d") :: value :: rest =>
+        parseArgs(rest, config.copy(dbPath = Some(value)))
+      case ("--max-headers" | "-m") :: value :: rest =>
+        value.toLongOption match
+          case Some(n) => parseArgs(rest, config.copy(maxHeaders = n))
+          case None    => Left(s"Invalid number: $value")
+      case "--magic" :: value :: rest =>
+        value.toLongOption match
+          case Some(n) => parseArgs(rest, config.copy(networkMagic = Some(n)))
+          case None    => Left(s"Invalid magic: $value")
+      case ("--help" | "-h") :: _ =>
+        Left("") // triggers usage
+      case unknown :: _ =>
+        Left(s"Unknown option: $unknown")
+
+  private def parsePeer(s: String): Either[String, (String, Int)] =
+    s.lastIndexOf(':') match
+      case -1 => Left(s"Invalid peer format '$s'. Expected host:port")
+      case idx =>
+        val host    = s.substring(0, idx)
+        val portStr = s.substring(idx + 1)
+        portStr.toIntOption match
+          case Some(p) if p > 0 && p < 65536 => Right((host, p))
+          case _                             => Left(s"Invalid port in '$s'")
+
+  private def resolveConfig(config: SyncHeadersConfig): IO[Either[String, ResolvedConfig]] = IO {
+    val preset      = config.network.flatMap(NetworkPreset.fromName)
+    val networkName = config.network.getOrElse(preset.map(_.name).getOrElse("custom"))
+
+    val magic = config.networkMagic
+      .orElse(preset.map(_.networkMagic))
+      .toRight("No network specified. Use --network <mainnet|preprod|preview> or --magic <number>")
+
+    magic.flatMap { m =>
+      val (host, port) = (config.host, config.port) match
+        case (Some(h), Some(p)) => (h, p)
+        case _ =>
+          preset.flatMap(_.defaultPeers.headOption).getOrElse(("", 0))
+
+      if host.isEmpty then Left(s"No peer specified. Use --peer host:port or a known --network with default peers")
+      else
+        val db = config.dbPath
+          .map(Paths.get(_))
+          .getOrElse(
+            Paths.get(".", "data", networkName)
+          )
+        Right(ResolvedConfig(networkName, m, host, port, db, config.maxHeaders))
+    }
+  }
+
+  // --- Usage ---
+
+  private def printUsage: IO[Unit] = IO.println(
+    """Usage: stretto <command> [options]
+      |
+      |Commands:
+      |  sync-headers   Sync block headers from a Cardano node
+      |  version        Print version
+      |  help           Show this help
+      |""".stripMargin
+  )
+
+  private def printSyncHeadersUsage: IO[Unit] = IO.println(
+    """Usage: stretto sync-headers [options]
+      |
+      |Options:
+      |  -n, --network <name>       Network: mainnet, preprod, preview
+      |  -p, --peer <host:port>     Peer address (overrides network default)
+      |  -d, --db <path>            Database directory (default: ./data/<network>)
+      |  -m, --max-headers <n>      Max headers to sync (0 = unlimited)
+      |      --magic <number>       Custom network magic (overrides --network)
+      |  -h, --help                 Show this help
+      |
+      |Examples:
+      |  stretto sync-headers --network preprod
+      |  stretto sync-headers --network mainnet --peer relay:3001
+      |  stretto sync-headers --peer custom-node:3001 --magic 42 --db ./mydata
+      |""".stripMargin
+  )
