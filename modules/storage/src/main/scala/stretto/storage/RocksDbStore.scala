@@ -1,0 +1,217 @@
+package stretto.storage
+
+import cats.effect.{IO, Resource}
+import org.rocksdb.*
+import scodec.bits.ByteVector
+import stretto.core.{Point, Tip}
+import stretto.core.Types.*
+
+import java.nio.file.{Files, Path}
+import scala.jdk.CollectionConverters.*
+
+/**
+ * RocksDB-backed chain store.
+ *
+ * Uses column families to separate concerns:
+ *   - "headers"  : point key → raw block header bytes
+ *   - "meta"     : string keys → chain metadata (tip, etc.)
+ *   - "by_height": blockNo (8-byte BE) → point key
+ *
+ * Point key format: slotNo (8-byte BE) ++ blockHash (32 bytes) = 40 bytes
+ */
+final class RocksDbStore private (
+    db: RocksDB,
+    cfHeaders: ColumnFamilyHandle,
+    cfMeta: ColumnFamilyHandle,
+    cfByHeight: ColumnFamilyHandle
+) extends ChainStore:
+
+  // ---------------------------------------------------------------------------
+  // Key encoding
+  // ---------------------------------------------------------------------------
+
+  private def pointKey(p: Point.BlockPoint): Array[Byte] =
+    val buf  = new Array[Byte](40)
+    val slot = p.slotNo.value
+    buf(0) = (slot >>> 56).toByte
+    buf(1) = (slot >>> 48).toByte
+    buf(2) = (slot >>> 40).toByte
+    buf(3) = (slot >>> 32).toByte
+    buf(4) = (slot >>> 24).toByte
+    buf(5) = (slot >>> 16).toByte
+    buf(6) = (slot >>> 8).toByte
+    buf(7) = slot.toByte
+    System.arraycopy(p.blockHash.toHash32.hash32Bytes.toArray, 0, buf, 8, 32)
+    buf
+
+  private def heightKey(blockNo: BlockNo): Array[Byte] =
+    val n = blockNo.blockNoValue
+    Array(
+      (n >>> 56).toByte,
+      (n >>> 48).toByte,
+      (n >>> 40).toByte,
+      (n >>> 32).toByte,
+      (n >>> 24).toByte,
+      (n >>> 16).toByte,
+      (n >>> 8).toByte,
+      n.toByte
+    )
+
+  private def decodePointKey(key: Array[Byte]): Point.BlockPoint =
+    val slot =
+      ((key(0).toLong & 0xff) << 56) |
+        ((key(1).toLong & 0xff) << 48) |
+        ((key(2).toLong & 0xff) << 40) |
+        ((key(3).toLong & 0xff) << 32) |
+        ((key(4).toLong & 0xff) << 24) |
+        ((key(5).toLong & 0xff) << 16) |
+        ((key(6).toLong & 0xff) << 8) |
+        (key(7).toLong & 0xff)
+    val hash = ByteVector.view(key, 8, 32)
+    Point.BlockPoint(SlotNo(slot), BlockHeaderHash(Hash32.unsafeFrom(hash)))
+
+  // ---------------------------------------------------------------------------
+  // Tip encoding: slotNo (8) ++ blockHash (32) ++ blockNo (8) = 48 bytes
+  // ---------------------------------------------------------------------------
+
+  private val tipKey = "tip".getBytes("UTF-8")
+
+  private def encodeTip(tip: Tip): Array[Byte] = tip.point match
+    case Point.Origin =>
+      new Array[Byte](48) // all zeros = origin
+    case bp: Point.BlockPoint =>
+      val buf = new Array[Byte](48)
+      System.arraycopy(pointKey(bp), 0, buf, 0, 40)
+      val bn = tip.blockNo.blockNoValue
+      buf(40) = (bn >>> 56).toByte
+      buf(41) = (bn >>> 48).toByte
+      buf(42) = (bn >>> 40).toByte
+      buf(43) = (bn >>> 32).toByte
+      buf(44) = (bn >>> 24).toByte
+      buf(45) = (bn >>> 16).toByte
+      buf(46) = (bn >>> 8).toByte
+      buf(47) = bn.toByte
+      buf
+
+  private def decodeTip(bytes: Array[Byte]): Tip =
+    val allZero = bytes.take(40).forall(_ == 0)
+    if allZero then Tip.origin
+    else
+      val point = decodePointKey(bytes.take(40))
+      val bn =
+        ((bytes(40).toLong & 0xff) << 56) |
+          ((bytes(41).toLong & 0xff) << 48) |
+          ((bytes(42).toLong & 0xff) << 40) |
+          ((bytes(43).toLong & 0xff) << 32) |
+          ((bytes(44).toLong & 0xff) << 24) |
+          ((bytes(45).toLong & 0xff) << 16) |
+          ((bytes(46).toLong & 0xff) << 8) |
+          (bytes(47).toLong & 0xff)
+      Tip(point, BlockNo(bn))
+
+  // ---------------------------------------------------------------------------
+  // ChainStore implementation
+  // ---------------------------------------------------------------------------
+
+  def putHeader(point: Point.BlockPoint, header: ByteVector): IO[Unit] =
+    IO {
+      val key = pointKey(point)
+      db.put(cfHeaders, key, header.toArray)
+    }
+
+  def getHeader(point: Point.BlockPoint): IO[Option[ByteVector]] =
+    IO {
+      Option(db.get(cfHeaders, pointKey(point))).map(ByteVector.view)
+    }
+
+  def putTip(tip: Tip): IO[Unit] =
+    IO {
+      db.put(cfMeta, tipKey, encodeTip(tip))
+    }
+
+  def getTip: IO[Option[Tip]] =
+    IO {
+      Option(db.get(cfMeta, tipKey)).map(decodeTip)
+    }
+
+  /** Store a header and update the height index and tip atomically. */
+  def putHeaderWithMeta(
+      point: Point.BlockPoint,
+      header: ByteVector,
+      blockNo: BlockNo,
+      tip: Tip
+  ): IO[Unit] =
+    IO {
+      val batch = new WriteBatch()
+      try
+        batch.put(cfHeaders, pointKey(point), header.toArray)
+        batch.put(cfByHeight, heightKey(blockNo), pointKey(point))
+        batch.put(cfMeta, tipKey, encodeTip(tip))
+        db.write(new WriteOptions(), batch)
+      finally batch.close()
+    }
+
+  /** Close all column family handles and the database. */
+  private[storage] def close(): Unit =
+    cfHeaders.close()
+    cfMeta.close()
+    cfByHeight.close()
+    db.close()
+
+  def recentPoints(count: Int): IO[List[Point.BlockPoint]] =
+    IO {
+      val it = db.newIterator(cfByHeight)
+      try
+        it.seekToLast()
+        val buf = List.newBuilder[Point.BlockPoint]
+        var n   = 0
+        while it.isValid && n < count do
+          buf += decodePointKey(it.value())
+          it.prev()
+          n += 1
+        buf.result()
+      finally it.close()
+    }
+
+object RocksDbStore:
+
+  /** Load the RocksDB native library once. */
+  RocksDB.loadLibrary()
+
+  private val cfNames = List("default", "headers", "meta", "by_height")
+
+  /**
+   * Open a RocksDB-backed chain store as a cats-effect Resource.
+   * The database directory is created if it doesn't exist.
+   */
+  def open(path: Path): Resource[IO, RocksDbStore] =
+    Resource.make(acquire(path))(release)
+
+  private def acquire(path: Path): IO[RocksDbStore] = IO {
+    Files.createDirectories(path)
+
+    val dbOpts = new DBOptions()
+      .setCreateIfMissing(true)
+      .setCreateMissingColumnFamilies(true)
+
+    val cfOpts = new ColumnFamilyOptions()
+      .setCompressionType(CompressionType.LZ4_COMPRESSION)
+
+    val cfDescriptors = cfNames
+      .map(name => new ColumnFamilyDescriptor(name.getBytes("UTF-8"), cfOpts))
+      .asJava
+
+    val cfHandles = new java.util.ArrayList[ColumnFamilyHandle]()
+
+    val db = RocksDB.open(dbOpts, path.toString, cfDescriptors, cfHandles)
+
+    new RocksDbStore(
+      db,
+      cfHeaders = cfHandles.get(1),
+      cfMeta = cfHandles.get(2),
+      cfByHeight = cfHandles.get(3)
+    )
+  }
+
+  private def release(store: RocksDbStore): IO[Unit] =
+    IO(store.close())

@@ -112,6 +112,8 @@ lazy val storage = project
     name := "stretto-storage",
     libraryDependencies ++= Seq(
       "co.fs2" %% "fs2-io" % fs2Version,
+      "org.typelevel" %% "cats-effect" % catsEffectVersion,
+      "org.rocksdb" % "rocksdbjni" % "9.7.3",
     ),
   )
 
