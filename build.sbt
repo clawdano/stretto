@@ -10,6 +10,7 @@ val http4sVersion = "0.23.30"
 val circeVersion = "0.14.10"
 val log4catsVersion = "2.7.0"
 val logbackVersion = "1.5.16"
+val bouncyCastleVersion = "1.80"
 
 ThisBuild / organization := "io.github.clawdano"
 ThisBuild / version := "0.1.0-SNAPSHOT"
@@ -49,6 +50,7 @@ lazy val core = project
       "org.typelevel" %% "cats-effect" % catsEffectVersion,
       "org.scodec" %% "scodec-bits" % scodecBitsVersion,
       "org.scodec" %% "scodec-core" % scodecCoreVersion,
+      "org.bouncycastle" % "bcprov-jdk18on" % bouncyCastleVersion,
     ),
   )
 
