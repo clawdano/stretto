@@ -151,6 +151,23 @@ final class RocksDbStore private (
       finally batch.close()
     }
 
+  /** Store multiple headers with metadata in a single atomic WriteBatch. */
+  def putBatch(
+      entries: List[(Point.BlockPoint, ByteVector, BlockNo)],
+      tip: Tip
+  ): IO[Unit] =
+    IO {
+      val batch = new WriteBatch()
+      try
+        entries.foreach { case (point, header, blockNo) =>
+          batch.put(cfHeaders, pointKey(point), header.toArray)
+          batch.put(cfByHeight, heightKey(blockNo), pointKey(point))
+        }
+        batch.put(cfMeta, tipKey, encodeTip(tip))
+        db.write(new WriteOptions(), batch)
+      finally batch.close()
+    }
+
   /** Close all column family handles and the database. */
   private[storage] def close(): Unit =
     cfHeaders.close()

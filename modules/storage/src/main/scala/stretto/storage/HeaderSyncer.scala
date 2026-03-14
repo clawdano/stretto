@@ -8,17 +8,13 @@ import stretto.core.Types.*
 /**
  * Syncs block headers from a ChainSync stream into persistent storage.
  *
- * This is a pure data-processing component — it doesn't know about the
- * network layer directly. Feed it (header, tip, blockNo) tuples from the
- * ChainSync client.
+ * Supports both single-header and batched writes. Batched writes group
+ * multiple headers into a single RocksDB WriteBatch for throughput.
  */
 final class HeaderSyncer(store: RocksDbStore):
 
   /**
    * Persist a new header that arrived via MsgRollForward.
-   *
-   * Extracts the point from the header bytes (era-wrapped format),
-   * stores the header, updates the height index, and advances the tip.
    */
   def rollForward(
       point: Point.BlockPoint,
@@ -27,6 +23,17 @@ final class HeaderSyncer(store: RocksDbStore):
       tip: Tip
   ): IO[Unit] =
     store.putHeaderWithMeta(point, header, blockNo, tip)
+
+  /**
+   * Persist a batch of headers atomically.
+   * All headers are written in a single WriteBatch with the final tip.
+   */
+  def rollForwardBatch(
+      entries: List[(Point.BlockPoint, ByteVector, BlockNo)],
+      tip: Tip
+  ): IO[Unit] =
+    if entries.isEmpty then IO.unit
+    else store.putBatch(entries, tip)
 
   /**
    * Handle a MsgRollBackward.

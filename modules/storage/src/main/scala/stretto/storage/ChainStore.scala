@@ -3,6 +3,7 @@ package stretto.storage
 import cats.effect.IO
 import scodec.bits.ByteVector
 import stretto.core.{Point, Tip}
+import stretto.core.Types.*
 
 /**
  * Abstract interface for persistent chain storage.
@@ -26,3 +27,9 @@ trait ChainStore:
 
   /** Get the most recent N headers (by block number), newest first. */
   def recentPoints(count: Int): IO[List[Point.BlockPoint]]
+
+  /** Store multiple headers with metadata in a single atomic batch. */
+  def putBatch(
+      entries: List[(Point.BlockPoint, ByteVector, BlockNo)],
+      tip: Tip
+  ): IO[Unit]

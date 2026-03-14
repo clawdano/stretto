@@ -8,13 +8,13 @@ import stretto.core.Types.*
  * Extracts minimal metadata from era-wrapped block headers.
  *
  * Era-wrapped format from ChainSync N2N:
- *   [era_tag, [sub_tag, tag24(headerBytes)]]
+ *   - Byron (era 0): [0, [[sub_tag, param], tag24(headerBytes)]]
+ *   - Shelley+ (era 1-6): [era_tag, tag24(headerBytes)]
  *
- * The inner array contains a sub-tag (e.g., 0=EBB, 1=main for Byron)
- * followed by the tag24-wrapped header CBOR bytes.
+ * Byron has an inner array with a sub-tag (0=EBB, 1=main block).
+ * Shelley+ eras wrap the header directly in tag24.
  *
- * We extract the slot number and compute the block header hash
- * (Blake2b-256 of the raw header bytes inside the tag24 wrapper).
+ * Block hash = Blake2b-256 of the CBOR bytes inside tag24.
  */
 object HeaderParser:
 
@@ -27,28 +27,42 @@ object HeaderParser:
 
   /**
    * Parse an era-wrapped header to extract era, slot, and block hash.
-   *
-   * The block hash is Blake2b-256 of the CBOR bytes inside tag24.
    */
   def parse(wrappedHeader: ByteVector): Either[String, HeaderMeta] =
     for
       (arrLen, afterArr) <- readArrayHeader(wrappedHeader, 0)
       _                  <- if arrLen == 2 then Right(()) else Left(s"expected 2-element era wrapper, got $arrLen")
       (eraTag, afterEra) <- readUInt(wrappedHeader, afterArr)
-      // Inner structure: [[sub_tag, param], tag24(headerBytes)]
-      (innerLen, afterInnerArr) <- readArrayHeader(wrappedHeader, afterEra)
-      _ <- if innerLen == 2 then Right(()) else Left(s"expected 2-element inner wrapper, got $innerLen")
-      // First element is [sub_tag, param] — skip it but extract sub_tag
-      (idArrLen, afterIdArr) <- readArrayHeader(wrappedHeader, afterInnerArr)
-      (subTag, _)            <- readUInt(wrappedHeader, afterIdArr)
-      // Skip past the entire [sub_tag, param] array
-      (_, afterIdItem) <- skipItem(wrappedHeader, afterInnerArr)
-      // Second element is tag24(headerBytes)
-      (headerBytes, _) <- readTag24ByteString(wrappedHeader, afterIdItem)
+      result <-
+        if eraTag == 0 then parseByron(wrappedHeader, afterEra)
+        else parseShelleyPlus(wrappedHeader, afterEra, eraTag.toInt)
+    yield result
+
+  /** Byron: [0, [[sub_tag, param], tag24(headerBytes)]] */
+  private def parseByron(bytes: ByteVector, offset: Int): Either[String, HeaderMeta] =
+    for
+      (innerLen, afterInnerArr) <- readArrayHeader(bytes, offset)
+      _                <- if innerLen == 2 then Right(()) else Left(s"expected 2-element inner wrapper, got $innerLen")
+      (_, afterIdArr)  <- readArrayHeader(bytes, afterInnerArr)
+      (subTag, _)      <- readUInt(bytes, afterIdArr)
+      (_, afterIdItem) <- skipItem(bytes, afterInnerArr)
+      (headerBytes, _) <- readTag24ByteString(bytes, afterIdItem)
       blockHash = Crypto.blake2b256(headerBytes)
       bh        = BlockHeaderHash(Hash32.unsafeFrom(blockHash))
-      // For Byron (era 0): subTag 0 = EBB, subTag 1 = main block
-      effectiveEra = if eraTag == 0 then subTag.toInt else eraTag.toInt
+      // subTag 0 = EBB, subTag 1 = main block
+      effectiveEra = subTag.toInt
+      slotNo <- extractSlot(effectiveEra, headerBytes)
+    yield HeaderMeta(effectiveEra, slotNo, bh)
+
+  /** Shelley+ (era 1-6): [era_tag, tag24(headerBytes)] */
+  private def parseShelleyPlus(bytes: ByteVector, offset: Int, eraTag: Int): Either[String, HeaderMeta] =
+    for
+      (headerBytes, _) <- readTag24ByteString(bytes, offset)
+      blockHash = Crypto.blake2b256(headerBytes)
+      bh        = BlockHeaderHash(Hash32.unsafeFrom(blockHash))
+      // eraTag in wire format: 1=Shelley, 2=Allegra, 3=Mary, 4=Alonzo, 5=Babbage, 6=Conway
+      // We map to effective era 2+ for Shelley+ slot extraction
+      effectiveEra = eraTag + 1
       slotNo <- extractSlot(effectiveEra, headerBytes)
     yield HeaderMeta(effectiveEra, slotNo, bh)
 

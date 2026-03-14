@@ -58,13 +58,8 @@ object MuxConnection:
     val propose = HandshakeMessage.handshakeClient(networkMagic)
     val encoded = HandshakeMessage.encode(propose)
     for
-      _ <- mux.send(MiniProtocolId.Handshake.id, encoded)
-      response <- mux.receive
-        .filter(_._1 == MiniProtocolId.Handshake.id)
-        .head
-        .compile
-        .lastOrError
-      (_, payload) = response
+      _       <- mux.send(MiniProtocolId.Handshake.id, encoded)
+      payload <- mux.recvProtocol(MiniProtocolId.Handshake.id)
       result <- HandshakeMessage.decode(payload) match
         case Right(HandshakeMessage.MsgAcceptVersion(version, _)) =>
           IO.pure(version)

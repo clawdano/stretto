@@ -10,9 +10,8 @@ import java.nio.file.Path
 
 /**
  * End-to-end sync pipeline: connects to a Cardano node, streams headers
- * via ChainSync N2N, parses them, and persists to RocksDB.
- *
- * Reports progress via a callback.
+ * via pipelined ChainSync N2N, parses them, and persists to RocksDB
+ * in batches for maximum throughput.
  */
 object SyncPipeline:
 
@@ -26,15 +25,17 @@ object SyncPipeline:
   )
 
   /**
-   * Run the sync pipeline for a given number of headers.
+   * Run the sync pipeline.
    *
-   * @param host         peer hostname
-   * @param port         peer N2N port
-   * @param networkMagic network magic (1 = preprod)
-   * @param dbPath       RocksDB directory
-   * @param maxHeaders   max headers to sync (0 = unlimited)
-   * @param onProgress   callback every `progressInterval` headers
+   * @param host             peer hostname
+   * @param port             peer N2N port
+   * @param networkMagic     network magic (1 = preprod)
+   * @param dbPath           RocksDB directory
+   * @param maxHeaders       max headers to sync (0 = unlimited)
+   * @param onProgress       callback every `progressInterval` headers
    * @param progressInterval how often to call onProgress
+   * @param pipelineWindow   number of in-flight ChainSync requests
+   * @param batchSize        number of headers per RocksDB WriteBatch
    */
   def sync(
       host: String,
@@ -43,78 +44,120 @@ object SyncPipeline:
       dbPath: Path,
       maxHeaders: Long,
       onProgress: SyncProgress => IO[Unit],
-      progressInterval: Int = 500
+      progressInterval: Int = 500,
+      pipelineWindow: Int = 100,
+      batchSize: Int = 50
   ): IO[SyncProgress] =
     RocksDbStore.open(dbPath).use { store =>
       val syncer = new HeaderSyncer(store)
       MuxConnection.connect(host, port, networkMagic).use { conn =>
         val client = new ChainSyncClient(conn.mux)
         for
-          // Resume from stored tip or start from origin
           knownPts <- syncer.knownPoints
-          _        <- client.findIntersect(knownPts)
-
-          // Track progress
-          result <- syncLoop(
+          result <- pipelinedSyncLoop(
             client,
             syncer,
+            knownPts,
             maxHeaders,
             onProgress,
-            progressInterval
+            progressInterval,
+            pipelineWindow,
+            batchSize
           )
         yield result
       }
     }
 
-  private def syncLoop(
+  private def pipelinedSyncLoop(
       client: ChainSyncClient,
       syncer: HeaderSyncer,
+      knownPoints: List[Point],
       maxHeaders: Long,
+      onProgress: SyncProgress => IO[Unit],
+      progressInterval: Int,
+      pipelineWindow: Int,
+      batchSize: Int
+  ): IO[SyncProgress] =
+    val headerStream = client.pipelinedHeaderStream(knownPoints, pipelineWindow)
+
+    // Process headers in chunks for batched RocksDB writes
+    headerStream.zipWithIndex
+      .takeWhile { case (_, idx) => maxHeaders <= 0 || idx < maxHeaders }
+      .groupWithin(batchSize, scala.concurrent.duration.FiniteDuration(100, "ms"))
+      .evalScan(SyncProgress(0L, 0L, 0L, SlotNo(0L), SlotNo(0L), BlockNo(0L))) { case (progress, chunk) =>
+        processBatch(syncer, progress, chunk.toList, onProgress, progressInterval)
+      }
+      .compile
+      .last
+      .map(_.getOrElse(SyncProgress(0L, 0L, 0L, SlotNo(0L), SlotNo(0L), BlockNo(0L))))
+      .flatTap(_ => client.done)
+
+  private def processBatch(
+      syncer: HeaderSyncer,
+      progress: SyncProgress,
+      batch: List[(ChainSyncResponse, Long)],
       onProgress: SyncProgress => IO[Unit],
       progressInterval: Int
   ): IO[SyncProgress] =
-    def go(
-        stored: Long,
-        rollbacks: Long,
-        errors: Long,
-        currentSlot: SlotNo,
-        peerTipSlot: SlotNo,
-        peerTipBlock: BlockNo,
-        blockNo: Long
-    ): IO[SyncProgress] =
-      if maxHeaders > 0 && stored >= maxHeaders then
-        val progress = SyncProgress(stored, rollbacks, errors, currentSlot, peerTipSlot, peerTipBlock)
-        client.done *> IO.pure(progress)
-      else
-        client.requestNext.flatMap {
-          case ChainSyncResponse.RollForward(header, tip) =>
-            HeaderParser.parse(header) match
-              case Right(meta) =>
-                val point: Point.BlockPoint = Point.BlockPoint(meta.slotNo, meta.blockHash)
-                val bn                      = BlockNo(blockNo)
-                syncer.rollForward(point, header, bn, tip) *> {
-                  val newStored = stored + 1
-                  val tipSlot = tip.point match
-                    case Point.Origin         => SlotNo(0L)
-                    case bp: Point.BlockPoint => bp.slotNo
-                  val report =
-                    if newStored % progressInterval == 0 then
-                      onProgress(
-                        SyncProgress(newStored, rollbacks, errors, meta.slotNo, tipSlot, tip.blockNo)
-                      )
-                    else IO.unit
-                  report *> go(newStored, rollbacks, errors, meta.slotNo, tipSlot, tip.blockNo, blockNo + 1)
-                }
-              case Left(_) =>
-                // Parse error — skip this header but keep going
-                go(stored, rollbacks, errors + 1, currentSlot, peerTipSlot, peerTipBlock, blockNo + 1)
+    // Separate forwards and backwards
+    val forwards = batch.collect { case (ChainSyncResponse.RollForward(header, tip), _) =>
+      (header, tip)
+    }
+    val rollbackCount = batch.count(_._1.isInstanceOf[ChainSyncResponse.RollBackward])
 
-          case ChainSyncResponse.RollBackward(_, tip) =>
-            val tipSlot = tip.point match
-              case Point.Origin         => SlotNo(0L)
-              case bp: Point.BlockPoint => bp.slotNo
-            syncer.rollBackward(tip) *>
-              go(stored, rollbacks + 1, errors, currentSlot, tipSlot, tip.blockNo, blockNo)
+    // Parse all forward headers
+    val (parsed, errors) = forwards.foldLeft(
+      (List.empty[(Point.BlockPoint, scodec.bits.ByteVector, BlockNo, stretto.core.Tip)], 0L)
+    ) { case ((acc, errs), (header, tip)) =>
+      HeaderParser.parse(header) match
+        case Right(meta) =>
+          val point: Point.BlockPoint = Point.BlockPoint(meta.slotNo, meta.blockHash)
+          val bn                      = BlockNo(progress.headersStored + acc.size + 1)
+          ((point, header, bn, tip) :: acc, errs)
+        case Left(_) =>
+          (acc, errs + 1)
+    }
+
+    val entries      = parsed.reverse
+    val lastTip      = entries.lastOption.map(_._4)
+    val lastRbTip    = batch.reverse.collectFirst { case (ChainSyncResponse.RollBackward(_, tip), _) => tip }
+    val effectiveTip = lastTip.orElse(lastRbTip)
+
+    // Batch write all parsed headers
+    val writeIO = entries match
+      case Nil => IO.unit
+      case _ =>
+        val tip = entries.last._4
+        syncer.rollForwardBatch(
+          entries.map { case (pt, hdr, bn, _) => (pt, hdr, bn) },
+          tip
+        )
+
+    // Handle rollbacks (just update tip for now)
+    val rollbackIO = batch
+      .collect { case (ChainSyncResponse.RollBackward(_, tip), _) =>
+        tip
+      }
+      .lastOption
+      .fold(IO.unit)(syncer.rollBackward)
+
+    val newProgress = SyncProgress(
+      headersStored = progress.headersStored + entries.size,
+      rollbacks = progress.rollbacks + rollbackCount,
+      parseErrors = progress.parseErrors + errors,
+      currentSlot = entries.lastOption.map(_._1.slotNo).getOrElse(progress.currentSlot),
+      peerTipSlot = effectiveTip
+        .map(_.point)
+        .collect { case bp: Point.BlockPoint =>
+          bp.slotNo
         }
+        .getOrElse(progress.peerTipSlot),
+      peerTipBlock = effectiveTip.map(_.blockNo).getOrElse(progress.peerTipBlock)
+    )
 
-    go(0L, 0L, 0L, SlotNo(0L), SlotNo(0L), BlockNo(0L), 1L)
+    val reportIO =
+      if newProgress.headersStored / progressInterval > progress.headersStored / progressInterval then
+        onProgress(newProgress)
+      else IO.unit
+
+    writeIO *> rollbackIO *> reportIO.as(newProgress)

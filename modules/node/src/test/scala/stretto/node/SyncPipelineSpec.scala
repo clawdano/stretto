@@ -8,7 +8,7 @@ import scala.concurrent.duration.*
 
 class SyncPipelineSpec extends CatsEffectSuite:
 
-  override def munitIOTimeout: Duration = 5.minutes
+  override def munitIOTimeout: Duration = 120.minutes
 
   private def tmpDir: Path =
     Files.createTempDirectory("stretto-sync-test")
@@ -28,8 +28,8 @@ class SyncPipelineSpec extends CatsEffectSuite:
         port = port,
         networkMagic = preprodMagic,
         dbPath = dir,
-        maxHeaders = 100,
-        progressInterval = 10,
+        maxHeaders = 5000000,
+        progressInterval = 100000,
         onProgress = progress =>
           IO.println(
             f"[sync] ${progress.headersStored}%,d headers | " +
@@ -38,7 +38,7 @@ class SyncPipelineSpec extends CatsEffectSuite:
               f"errors: ${progress.parseErrors}"
           )
       )
-      .timeout(5.minutes)
+      .timeout(120.minutes)
       .flatMap { result =>
         val elapsed = System.currentTimeMillis() - startTime
         IO.println(
