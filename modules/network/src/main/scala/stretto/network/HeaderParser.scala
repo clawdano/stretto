@@ -47,8 +47,14 @@ object HeaderParser:
       (subTag, _)      <- readUInt(bytes, afterIdArr)
       (_, afterIdItem) <- skipItem(bytes, afterInnerArr)
       (headerBytes, _) <- readTag24ByteString(bytes, afterIdItem)
-      blockHash = Crypto.blake2b256(headerBytes)
-      bh        = BlockHeaderHash(Hash32.unsafeFrom(blockHash))
+      // Byron header hash requires prepending a CBOR wrapper before hashing:
+      //   EBB (subTag 0): hash(0x82 0x00 ++ headerBytes)
+      //   Regular (subTag 1): hash(0x82 0x01 ++ headerBytes)
+      // This matches the original cardano-sl encoding where the block type
+      // discriminator was part of the hashed bytes.
+      wrappedForHash = ByteVector(0x82.toByte, subTag.toByte) ++ headerBytes
+      blockHash      = Crypto.blake2b256(wrappedForHash)
+      bh             = BlockHeaderHash(Hash32.unsafeFrom(blockHash))
       // subTag 0 = EBB, subTag 1 = main block
       effectiveEra = subTag.toInt
       slotNo <- extractSlot(effectiveEra, headerBytes)
