@@ -32,6 +32,9 @@ object Main extends IOApp:
             executeSyncHeaders(resolved)
         }
 
+  private val MaxRetries    = 10
+  private val RetryDelaySec = 5
+
   private def executeSyncHeaders(config: ResolvedConfig): IO[ExitCode] =
     for
       _         <- logger.info(s"Stretto — Cardano header sync")
@@ -40,50 +43,68 @@ object Main extends IOApp:
       _         <- logger.info(s"Database: ${config.dbPath}")
       _         <- if config.maxHeaders > 0 then logger.info(s"Max headers: ${config.maxHeaders}") else IO.unit
       startTime <- IO.monotonic
-      result <- SyncPipeline
-        .sync(
-          host = config.host,
-          port = config.port,
-          networkMagic = config.networkMagic,
-          dbPath = config.dbPath,
-          maxHeaders = config.maxHeaders,
-          onProgress = progress =>
-            for
-              elapsed <- IO.monotonic.map(now => (now - startTime).toSeconds.max(1))
-              rate = progress.headersStored.toDouble / elapsed.toDouble
-              pct =
-                if progress.peerTipBlock.blockNoValue > 0 then
-                  f"${progress.headersStored.toDouble / progress.peerTipBlock.blockNoValue * 100}%.1f%%"
-                else "N/A"
-              _ <- logger.info(
-                s"Progress: ${progress.headersStored} headers " +
-                  s"(slot ${progress.currentSlot.value}, $pct) " +
-                  f"@ $rate%.0f hdr/s" +
-                  s" | tip: slot ${progress.peerTipSlot.value} block ${progress.peerTipBlock.blockNoValue}" +
-                  (if progress.rollbacks > 0 then s" | rollbacks: ${progress.rollbacks}" else "") +
-                  (if progress.parseErrors > 0 then s" | errors: ${progress.parseErrors}" else "")
-              )
-            yield ()
-        )
-        .handleErrorWith { err =>
-          logger.error(err)(s"Sync failed: ${err.getMessage}") *>
-            IO.pure(
-              SyncPipeline.SyncProgress(
-                0L,
-                0L,
-                0L,
-                stretto.core.Types.SlotNo(0L),
-                stretto.core.Types.SlotNo(0L),
-                stretto.core.Types.BlockNo(0L)
-              )
-            )
-        }
-      elapsed <- IO.monotonic.map(now => (now - startTime).toSeconds)
+      result    <- syncWithRetry(config, startTime, 0)
+      elapsed   <- IO.monotonic.map(now => (now - startTime).toSeconds)
       _ <- logger.info(
         s"Sync complete: ${result.headersStored} headers in ${elapsed}s" +
           s" (${result.rollbacks} rollbacks, ${result.parseErrors} errors)"
       )
     yield if result.parseErrors > 0 then ExitCode(1) else ExitCode.Success
+
+  private def syncWithRetry(
+      config: ResolvedConfig,
+      startTime: scala.concurrent.duration.FiniteDuration,
+      attempt: Int
+  ): IO[SyncPipeline.SyncProgress] =
+    runSyncOnce(config, startTime).handleErrorWith { err =>
+      if attempt >= MaxRetries then
+        logger.error(err)(s"Sync failed after ${attempt + 1} attempts: ${err.getMessage}") *>
+          IO.pure(
+            SyncPipeline.SyncProgress(
+              0L,
+              0L,
+              0L,
+              stretto.core.Types.SlotNo(0L),
+              stretto.core.Types.SlotNo(0L),
+              stretto.core.Types.BlockNo(0L)
+            )
+          )
+      else
+        logger.warn(
+          s"Connection lost: ${err.getMessage}. Reconnecting in ${RetryDelaySec}s (attempt ${attempt + 1}/$MaxRetries)..."
+        ) *>
+          IO.sleep(scala.concurrent.duration.FiniteDuration(RetryDelaySec.toLong, "s")) *>
+          syncWithRetry(config, startTime, attempt + 1)
+    }
+
+  private def runSyncOnce(
+      config: ResolvedConfig,
+      startTime: scala.concurrent.duration.FiniteDuration
+  ): IO[SyncPipeline.SyncProgress] =
+    SyncPipeline.sync(
+      host = config.host,
+      port = config.port,
+      networkMagic = config.networkMagic,
+      dbPath = config.dbPath,
+      maxHeaders = config.maxHeaders,
+      onProgress = progress =>
+        for
+          elapsed <- IO.monotonic.map(now => (now - startTime).toSeconds.max(1))
+          rate = progress.headersStored.toDouble / elapsed.toDouble
+          pct =
+            if progress.peerTipBlock.blockNoValue > 0 then
+              f"${progress.headersStored.toDouble / progress.peerTipBlock.blockNoValue * 100}%.1f%%"
+            else "N/A"
+          _ <- logger.info(
+            s"Progress: ${progress.headersStored} headers " +
+              s"(slot ${progress.currentSlot.value}, $pct) " +
+              f"@ $rate%.0f hdr/s" +
+              s" | tip: slot ${progress.peerTipSlot.value} block ${progress.peerTipBlock.blockNoValue}" +
+              (if progress.rollbacks > 0 then s" | rollbacks: ${progress.rollbacks}" else "") +
+              (if progress.parseErrors > 0 then s" | errors: ${progress.parseErrors}" else "")
+          )
+        yield ()
+    )
 
   // --- Config types ---
 
