@@ -3,7 +3,7 @@ package stretto.node
 import cats.effect.IO
 import stretto.core.Point
 import stretto.core.Types.*
-import stretto.network.{ChainSyncClient, ChainSyncResponse, HeaderParser, MuxConnection}
+import stretto.network.{ChainSyncClient, ChainSyncResponse, HeaderParser, KeepAliveClient, MuxConnection}
 import stretto.storage.{HeaderSyncer, RocksDbStore}
 
 import java.nio.file.Path
@@ -51,8 +51,10 @@ object SyncPipeline:
     RocksDbStore.open(dbPath).use { store =>
       val syncer = new HeaderSyncer(store)
       MuxConnection.connect(host, port, networkMagic).use { conn =>
-        val client = new ChainSyncClient(conn.mux)
+        val client    = new ChainSyncClient(conn.mux)
+        val keepAlive = new KeepAliveClient(conn.mux)
         for
+          _        <- keepAlive.respondLoop.start
           knownPts <- syncer.knownPoints
           result <- pipelinedSyncLoop(
             client,

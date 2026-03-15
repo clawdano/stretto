@@ -5,7 +5,14 @@ import org.typelevel.log4cats.slf4j.Slf4jLogger
 import scodec.bits.ByteVector
 import stretto.core.{Point, Tip}
 import stretto.core.Types.*
-import stretto.network.{BlockFetchClient, ChainSyncClient, ChainSyncResponse, HeaderParser, MuxConnection}
+import stretto.network.{
+  BlockFetchClient,
+  ChainSyncClient,
+  ChainSyncResponse,
+  HeaderParser,
+  KeepAliveClient,
+  MuxConnection
+}
 import stretto.storage.{BlockSyncer, RocksDbStore}
 
 import java.nio.file.Path
@@ -63,7 +70,9 @@ object BlockSyncPipeline:
       MuxConnection.connect(host, port, networkMagic).use { conn =>
         val chainSyncClient  = new ChainSyncClient(conn.mux)
         val blockFetchClient = new BlockFetchClient(conn.mux)
+        val keepAlive        = new KeepAliveClient(conn.mux)
         for
+          _        <- keepAlive.respondLoop.start
           knownPts <- syncer.knownPoints
           result <- pipelinedSyncLoop(
             chainSyncClient,

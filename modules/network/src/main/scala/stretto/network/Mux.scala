@@ -1,7 +1,7 @@
 package stretto.network
 
 import cats.effect.IO
-import cats.effect.std.Queue
+import cats.effect.std.{Queue, Semaphore}
 import cats.effect.Ref
 import cats.syntax.all.*
 import fs2.{Chunk, Pull, Stream}
@@ -207,7 +207,8 @@ private final class ChannelBuffer(
 final class MuxDemuxer private (
     socket: Socket[IO],
     channels: TrieMap[Int, ChannelBuffer],
-    fallbackQueue: Queue[IO, Option[MuxFrame]]
+    fallbackQueue: Queue[IO, Option[MuxFrame]],
+    writeLock: Semaphore[IO]
 ):
 
   /** Send a payload on the given mini-protocol id (initiator direction). */
@@ -218,7 +219,7 @@ final class MuxDemuxer private (
       isResponse = false,
       payload = payload
     )
-    socket.write(Chunk.byteVector(MuxFrame.encode(frame)))
+    writeLock.permit.use(_ => socket.write(Chunk.byteVector(MuxFrame.encode(frame))))
 
   /** Send a response payload on the given mini-protocol id. */
   def sendResponse(miniProtocolId: Int, payload: ByteVector): IO[Unit] =
@@ -228,7 +229,7 @@ final class MuxDemuxer private (
       isResponse = true,
       payload = payload
     )
-    socket.write(Chunk.byteVector(MuxFrame.encode(frame)))
+    writeLock.permit.use(_ => socket.write(Chunk.byteVector(MuxFrame.encode(frame))))
 
   /**
    * Receive one complete reassembled message for a specific mini-protocol.
@@ -272,9 +273,10 @@ object MuxDemuxer:
   /** Create a MuxDemuxer that reads from the socket in a background fiber. */
   def apply(socket: Socket[IO]): IO[MuxDemuxer] =
     for
-      fallback <- Queue.unbounded[IO, Option[MuxFrame]]
+      fallback  <- Queue.unbounded[IO, Option[MuxFrame]]
+      writeLock <- Semaphore[IO](1)
       chans   = new TrieMap[Int, ChannelBuffer]()
-      demuxer = new MuxDemuxer(socket, chans, fallback)
+      demuxer = new MuxDemuxer(socket, chans, fallback, writeLock)
       _ <- MuxFrame
         .frameStream(socket.reads)
         .evalMap(frame => demuxer.routeFrame(frame))

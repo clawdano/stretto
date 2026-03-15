@@ -28,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **CI pipeline** — GitHub Actions with formatting checks and test suite
 
 ### Fixed
+- **Mux write contention** — add `Semaphore` to serialize concurrent socket writes from ChainSync + BlockFetch, preventing frame interleaving
+- **KeepAlive support** — respond to peer KeepAlive pings to prevent timeout disconnections during large block downloads
 - **Byron header hash** — prepend `0x82 + sub_tag` before hashing to match cardano-ledger-byron's `wrapBoundaryBytes`/`wrapHeaderBytes`
 - **Preview network** — extend handshake to propose version 14 (preview nodes require v14+)
 
