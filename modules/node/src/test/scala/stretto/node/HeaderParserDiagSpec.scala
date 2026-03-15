@@ -16,7 +16,8 @@ class HeaderParserDiagSpec extends CatsEffectSuite:
   private val port         = 30010
   private val preprodMagic = 1L
 
-  test("diagnose HeaderParser on first 50 headers from genesis") {
+  // Requires local network access to panic-station — skipped in CI
+  test("diagnose HeaderParser on first 50 headers from genesis".ignore) {
     MuxConnection
       .connect(host, port, preprodMagic)
       .use { conn =>
