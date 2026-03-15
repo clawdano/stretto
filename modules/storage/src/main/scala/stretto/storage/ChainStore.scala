@@ -33,3 +33,15 @@ trait ChainStore:
       entries: List[(Point.BlockPoint, ByteVector, BlockNo)],
       tip: Tip
   ): IO[Unit]
+
+  /** Persist a full block body. */
+  def putBlock(point: Point.BlockPoint, blockData: ByteVector): IO[Unit]
+
+  /** Retrieve a full block body by point. */
+  def getBlock(point: Point.BlockPoint): IO[Option[ByteVector]]
+
+  /** Store headers + blocks + height index + tip in a single atomic batch. */
+  def putBatchWithBlocks(
+      entries: List[(Point.BlockPoint, ByteVector, BlockNo, ByteVector)],
+      tip: Tip
+  ): IO[Unit]

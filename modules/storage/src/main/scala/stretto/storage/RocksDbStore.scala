@@ -23,7 +23,8 @@ final class RocksDbStore private (
     db: RocksDB,
     cfHeaders: ColumnFamilyHandle,
     cfMeta: ColumnFamilyHandle,
-    cfByHeight: ColumnFamilyHandle
+    cfByHeight: ColumnFamilyHandle,
+    cfBlocks: ColumnFamilyHandle
 ) extends ChainStore:
 
   // ---------------------------------------------------------------------------
@@ -168,11 +169,40 @@ final class RocksDbStore private (
       finally batch.close()
     }
 
+  def putBlock(point: Point.BlockPoint, blockData: ByteVector): IO[Unit] =
+    IO {
+      db.put(cfBlocks, pointKey(point), blockData.toArray)
+    }
+
+  def getBlock(point: Point.BlockPoint): IO[Option[ByteVector]] =
+    IO {
+      Option(db.get(cfBlocks, pointKey(point))).map(ByteVector.view)
+    }
+
+  def putBatchWithBlocks(
+      entries: List[(Point.BlockPoint, ByteVector, BlockNo, ByteVector)],
+      tip: Tip
+  ): IO[Unit] =
+    IO {
+      val batch = new WriteBatch()
+      try
+        entries.foreach { case (point, header, blockNo, blockData) =>
+          val pk = pointKey(point)
+          batch.put(cfHeaders, pk, header.toArray)
+          batch.put(cfBlocks, pk, blockData.toArray)
+          batch.put(cfByHeight, heightKey(blockNo), pk)
+        }
+        batch.put(cfMeta, tipKey, encodeTip(tip))
+        db.write(new WriteOptions(), batch)
+      finally batch.close()
+    }
+
   /** Close all column family handles and the database. */
   private[storage] def close(): Unit =
     cfHeaders.close()
     cfMeta.close()
     cfByHeight.close()
+    cfBlocks.close()
     db.close()
 
   def recentPoints(count: Int): IO[List[Point.BlockPoint]] =
@@ -195,7 +225,7 @@ object RocksDbStore:
   /** Load the RocksDB native library once. */
   RocksDB.loadLibrary()
 
-  private val cfNames = List("default", "headers", "meta", "by_height")
+  private val cfNames = List("default", "headers", "meta", "by_height", "blocks")
 
   /**
    * Open a RocksDB-backed chain store as a cats-effect Resource.
@@ -226,7 +256,8 @@ object RocksDbStore:
       db,
       cfHeaders = cfHandles.get(1),
       cfMeta = cfHandles.get(2),
-      cfByHeight = cfHandles.get(3)
+      cfByHeight = cfHandles.get(3),
+      cfBlocks = cfHandles.get(4)
     )
   }
 

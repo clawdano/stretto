@@ -109,3 +109,63 @@ class RocksDbStoreSpec extends CatsEffectSuite:
       yield assertEquals(result, Some(Tip.origin))
     }
   }
+
+  test("putBlock and getBlock round-trip") {
+    withStore { store =>
+      val blockData = ByteVector.fromValidHex("cafebabe0102030405")
+      for
+        _      <- store.putBlock(point1, blockData)
+        result <- store.getBlock(point1)
+      yield assertEquals(result, Some(blockData))
+    }
+  }
+
+  test("getBlock returns None for missing block") {
+    withStore { store =>
+      store.getBlock(point1).map(r => assertEquals(r, None))
+    }
+  }
+
+  test("putBatchWithBlocks stores headers, blocks, height, and tip atomically") {
+    withStore { store =>
+      val block1 = ByteVector.fromValidHex("b10c0001")
+      val block2 = ByteVector.fromValidHex("b10c0002")
+      val tip    = Tip(point2, BlockNo(2L))
+      val entries = List(
+        (point1, header1, BlockNo(1L), block1),
+        (point2, header2, BlockNo(2L), block2)
+      )
+      for
+        _       <- store.putBatchWithBlocks(entries, tip)
+        h1      <- store.getHeader(point1)
+        h2      <- store.getHeader(point2)
+        bl1     <- store.getBlock(point1)
+        bl2     <- store.getBlock(point2)
+        tipRead <- store.getTip
+        recent  <- store.recentPoints(10)
+      yield
+        assertEquals(h1, Some(header1))
+        assertEquals(h2, Some(header2))
+        assertEquals(bl1, Some(block1))
+        assertEquals(bl2, Some(block2))
+        assertEquals(tipRead, Some(tip))
+        assertEquals(recent.size, 2)
+        assertEquals(recent.head, point2)
+        assertEquals(recent.last, point1)
+    }
+  }
+
+  test("putBatch (header-only) still works after blocks CF added") {
+    withStore { store =>
+      val tip = Tip(point1, BlockNo(1L))
+      for
+        _       <- store.putBatch(List((point1, header1, BlockNo(1L))), tip)
+        h1      <- store.getHeader(point1)
+        bl1     <- store.getBlock(point1) // should be None — no block stored
+        tipRead <- store.getTip
+      yield
+        assertEquals(h1, Some(header1))
+        assertEquals(bl1, None)
+        assertEquals(tipRead, Some(tip))
+    }
+  }

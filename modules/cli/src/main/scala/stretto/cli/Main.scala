@@ -3,7 +3,7 @@ package stretto.cli
 import cats.effect.{ExitCode, IO, IOApp}
 import cats.syntax.all.*
 import org.typelevel.log4cats.slf4j.Slf4jLogger
-import stretto.node.{NetworkPreset, SyncPipeline}
+import stretto.node.{BlockSyncPipeline, NetworkPreset, SyncPipeline}
 
 import java.nio.file.{Path, Paths}
 
@@ -15,6 +15,7 @@ object Main extends IOApp:
   override def run(args: List[String]): IO[ExitCode] =
     args match
       case "sync-headers" :: rest => runSyncHeaders(rest)
+      case "sync-blocks" :: rest  => runSyncBlocks(rest)
       case "version" :: _         => IO.println("stretto 0.1.0-SNAPSHOT") *> IO.pure(ExitCode.Success)
       case "help" :: _ | Nil      => printUsage *> IO.pure(ExitCode.Success)
       case unknown :: _ =>
@@ -32,8 +33,88 @@ object Main extends IOApp:
             executeSyncHeaders(resolved)
         }
 
+  private def runSyncBlocks(args: List[String]): IO[ExitCode] =
+    parseSyncBlocksArgs(args, SyncBlocksConfig()) match
+      case Left(err) =>
+        IO.println(s"Error: $err") *> IO.println("") *> printSyncBlocksUsage *> IO.pure(ExitCode(2))
+      case Right(config) =>
+        resolveSyncBlocksConfig(config).flatMap {
+          case Left(err) =>
+            IO.println(s"Error: $err") *> IO.pure(ExitCode(2))
+          case Right(resolved) =>
+            executeSyncBlocks(resolved)
+        }
+
   private val MaxRetries    = 10
   private val RetryDelaySec = 5
+
+  private def executeSyncBlocks(config: ResolvedBlockConfig): IO[ExitCode] =
+    for
+      _         <- logger.info(s"Stretto — Cardano block sync")
+      _         <- logger.info(s"Network: ${config.networkName} (magic ${config.networkMagic})")
+      _         <- logger.info(s"Peer: ${config.host}:${config.port}")
+      _         <- logger.info(s"Database: ${config.dbPath}")
+      _         <- if config.maxBlocks > 0 then logger.info(s"Max blocks: ${config.maxBlocks}") else IO.unit
+      startTime <- IO.monotonic
+      result    <- syncBlocksWithRetry(config, startTime, 0)
+      elapsed   <- IO.monotonic.map(now => (now - startTime).toSeconds)
+      _ <- logger.info(
+        s"Sync complete: ${result.blocksStored} blocks (${formatBytes(result.blockBytes)}) in ${elapsed}s" +
+          s" (${result.rollbacks} rollbacks, ${result.parseErrors} parse errors, ${result.fetchErrors} fetch errors)"
+      )
+    yield if result.parseErrors > 0 || result.fetchErrors > 0 then ExitCode(1) else ExitCode.Success
+
+  private def syncBlocksWithRetry(
+      config: ResolvedBlockConfig,
+      startTime: scala.concurrent.duration.FiniteDuration,
+      attempt: Int
+  ): IO[BlockSyncPipeline.SyncProgress] =
+    runBlockSyncOnce(config, startTime).handleErrorWith { err =>
+      if attempt >= MaxRetries then
+        logger.error(err)(s"Sync failed after ${attempt + 1} attempts: ${err.getMessage}") *>
+          IO.pure(BlockSyncPipeline.emptyProgress)
+      else
+        logger.warn(
+          s"Connection lost: ${err.getMessage}. Reconnecting in ${RetryDelaySec}s (attempt ${attempt + 1}/$MaxRetries)..."
+        ) *>
+          IO.sleep(scala.concurrent.duration.FiniteDuration(RetryDelaySec.toLong, "s")) *>
+          syncBlocksWithRetry(config, startTime, attempt + 1)
+    }
+
+  private def runBlockSyncOnce(
+      config: ResolvedBlockConfig,
+      startTime: scala.concurrent.duration.FiniteDuration
+  ): IO[BlockSyncPipeline.SyncProgress] =
+    BlockSyncPipeline.sync(
+      host = config.host,
+      port = config.port,
+      networkMagic = config.networkMagic,
+      dbPath = config.dbPath,
+      maxBlocks = config.maxBlocks,
+      onProgress = progress =>
+        for
+          elapsed <- IO.monotonic.map(now => (now - startTime).toSeconds.max(1))
+          bytesPerSec = progress.blockBytes.toDouble / elapsed.toDouble
+          pct =
+            if progress.peerTipBlock.blockNoValue > 0 then
+              f"${progress.blocksStored.toDouble / progress.peerTipBlock.blockNoValue * 100}%.1f%%"
+            else "N/A"
+          _ <- logger.info(
+            s"Progress: ${progress.blocksStored} blocks (${formatBytes(progress.blockBytes)}) " +
+              s"(slot ${progress.currentSlot.value}, $pct) " +
+              f"@ ${formatBytes(bytesPerSec.toLong)}/s" +
+              s" | tip: slot ${progress.peerTipSlot.value} block ${progress.peerTipBlock.blockNoValue}" +
+              (if progress.rollbacks > 0 then s" | rollbacks: ${progress.rollbacks}" else "") +
+              (if progress.fetchErrors > 0 then s" | fetch errors: ${progress.fetchErrors}" else "")
+          )
+        yield ()
+    )
+
+  private def formatBytes(bytes: Long): String =
+    if bytes < 1024 then s"${bytes}B"
+    else if bytes < 1024 * 1024 then f"${bytes / 1024.0}%.1fKB"
+    else if bytes < 1024L * 1024 * 1024 then f"${bytes / (1024.0 * 1024)}%.1fMB"
+    else f"${bytes / (1024.0 * 1024 * 1024)}%.2fGB"
 
   private def executeSyncHeaders(config: ResolvedConfig): IO[ExitCode] =
     for
@@ -126,7 +207,74 @@ object Main extends IOApp:
       maxHeaders: Long
   )
 
+  private case class SyncBlocksConfig(
+      network: Option[String] = None,
+      host: Option[String] = None,
+      port: Option[Int] = None,
+      dbPath: Option[String] = None,
+      maxBlocks: Long = 0L,
+      networkMagic: Option[Long] = None
+  )
+
+  private case class ResolvedBlockConfig(
+      networkName: String,
+      networkMagic: Long,
+      host: String,
+      port: Int,
+      dbPath: Path,
+      maxBlocks: Long
+  )
+
   // --- Arg parsing ---
+
+  private def parseSyncBlocksArgs(args: List[String], config: SyncBlocksConfig): Either[String, SyncBlocksConfig] =
+    args match
+      case Nil => Right(config)
+      case ("--network" | "-n") :: value :: rest =>
+        parseSyncBlocksArgs(rest, config.copy(network = Some(value)))
+      case ("--peer" | "-p") :: value :: rest =>
+        parsePeer(value).flatMap { case (h, p) =>
+          parseSyncBlocksArgs(rest, config.copy(host = Some(h), port = Some(p)))
+        }
+      case ("--db" | "-d") :: value :: rest =>
+        parseSyncBlocksArgs(rest, config.copy(dbPath = Some(value)))
+      case ("--max-blocks" | "-m") :: value :: rest =>
+        value.toLongOption match
+          case Some(n) => parseSyncBlocksArgs(rest, config.copy(maxBlocks = n))
+          case None    => Left(s"Invalid number: $value")
+      case "--magic" :: value :: rest =>
+        value.toLongOption match
+          case Some(n) => parseSyncBlocksArgs(rest, config.copy(networkMagic = Some(n)))
+          case None    => Left(s"Invalid magic: $value")
+      case ("--help" | "-h") :: _ =>
+        Left("")
+      case unknown :: _ =>
+        Left(s"Unknown option: $unknown")
+
+  private def resolveSyncBlocksConfig(config: SyncBlocksConfig): IO[Either[String, ResolvedBlockConfig]] = IO {
+    val preset      = config.network.flatMap(NetworkPreset.fromName)
+    val networkName = config.network.getOrElse(preset.map(_.name).getOrElse("custom"))
+
+    val magic = config.networkMagic
+      .orElse(preset.map(_.networkMagic))
+      .toRight("No network specified. Use --network <mainnet|preprod|preview> or --magic <number>")
+
+    magic.flatMap { m =>
+      val (host, port) = (config.host, config.port) match
+        case (Some(h), Some(p)) => (h, p)
+        case _ =>
+          preset.flatMap(_.defaultPeers.headOption).getOrElse(("", 0))
+
+      if host.isEmpty then Left(s"No peer specified. Use --peer host:port or a known --network with default peers")
+      else
+        val db = config.dbPath
+          .map(Paths.get(_))
+          .getOrElse(
+            Paths.get(".", "data", networkName)
+          )
+        Right(ResolvedBlockConfig(networkName, m, host, port, db, config.maxBlocks))
+    }
+  }
 
   private def parseArgs(args: List[String], config: SyncHeadersConfig): Either[String, SyncHeadersConfig] =
     args match
@@ -194,6 +342,7 @@ object Main extends IOApp:
       |
       |Commands:
       |  sync-headers   Sync block headers from a Cardano node
+      |  sync-blocks    Sync full blocks (headers + bodies) from a Cardano node
       |  version        Print version
       |  help           Show this help
       |""".stripMargin
@@ -214,5 +363,26 @@ object Main extends IOApp:
       |  stretto sync-headers --network preprod
       |  stretto sync-headers --network mainnet --peer relay:3001
       |  stretto sync-headers --peer custom-node:3001 --magic 42 --db ./mydata
+      |""".stripMargin
+  )
+
+  private def printSyncBlocksUsage: IO[Unit] = IO.println(
+    """Usage: stretto sync-blocks [options]
+      |
+      |Syncs full blocks (headers + bodies) from a Cardano node using
+      |ChainSync + BlockFetch over a single multiplexed connection.
+      |
+      |Options:
+      |  -n, --network <name>       Network: mainnet, preprod, preview
+      |  -p, --peer <host:port>     Peer address (overrides network default)
+      |  -d, --db <path>            Database directory (default: ./data/<network>)
+      |  -m, --max-blocks <n>       Max blocks to sync (0 = unlimited)
+      |      --magic <number>       Custom network magic (overrides --network)
+      |  -h, --help                 Show this help
+      |
+      |Examples:
+      |  stretto sync-blocks --network preprod --peer panic-station:30010
+      |  stretto sync-blocks --network preprod --peer panic-station:30010 --max-blocks 100
+      |  stretto sync-blocks --peer custom-node:3001 --magic 42 --db ./mydata
       |""".stripMargin
   )

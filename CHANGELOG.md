@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.1.0-SNAPSHOT] - 2026-03-15
 
 ### Added
+- **Block sync pipeline** — `sync-blocks` command downloads full blocks via BlockFetch alongside headers from ChainSync, storing both atomically in RocksDB
+- **Storage: blocks column family** — new `blocks` CF (index 4) for full block bodies, with `putBlock`, `getBlock`, `putBatchWithBlocks` methods
+- **BlockSyncer** — protocol-level adapter for combined header+block batch persistence with rollback support
+- **BlockSyncPipeline** — end-to-end pipeline: ChainSync headers → batch 50 → BlockFetch range → atomic persist, with progress reporting (blocks stored, MB/s throughput, fetch errors)
+- **CLI** — `stretto sync-blocks` command with `--network`, `--peer`, `--db`, `--max-blocks`, `--magic` options
 - **CLI** — `stretto sync-headers` command with `--network`, `--peer`, `--db`, `--max-headers`, `--magic` options
 - **Auto-reconnect** — automatic retry with backoff on connection loss (up to 10 retries)
 - **Multi-network support** — mainnet, preprod, preview presets with default relay peers
@@ -27,7 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Preview network** — extend handshake to propose version 14 (preview nodes require v14+)
 
 ### Testing
-- 171 tests total (166 passing, 5 ignored integration tests)
+- 243 tests total (235 passing, 8 ignored integration tests)
 - Conformance test vectors sourced from ouroboros-network CDDL specs and Pallas (Rust)
 - Round-trip codec tests for all protocol messages (ChainSync, BlockFetch, Handshake, MuxFrame)
 - Low-level CBOR primitive tests (uint, bstr, array, map, tag, bool)
