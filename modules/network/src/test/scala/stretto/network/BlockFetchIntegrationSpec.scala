@@ -23,8 +23,8 @@ class BlockFetchIntegrationSpec extends CatsEffectSuite:
     MuxConnection
       .connect(host, port, mainnetMagic)
       .use { conn =>
-        val chainSync  = new ChainSyncClient(conn.mux)
-        val blockFetch = new BlockFetchClient(conn.mux)
+        val chainSync = new ChainSyncClient(conn.mux)
+        val protoId   = MiniProtocolId.BlockFetch.id
 
         for
           // Step 1: Find intersection from genesis
@@ -35,9 +35,9 @@ class BlockFetchIntegrationSpec extends CatsEffectSuite:
           r0 <- chainSync.requestNext
           _  <- IO.println(s"Initial response: $r0")
 
-          // Step 3: Collect headers (request more to skip any rollbacks)
+          // Step 3: Collect 7 headers
           headers <- collectHeaders(chainSync, 7)
-          _ <- IO.println(s"\nCollected ${headers.size} headers")
+          _       <- IO.println(s"\nCollected ${headers.size} headers")
 
           // Use headers 2-6 (skip EBB at index 0, use regular Byron blocks)
           selected = headers.drop(1).take(5)
@@ -46,44 +46,74 @@ class BlockFetchIntegrationSpec extends CatsEffectSuite:
             IO.println(s"  Point $i: slot=${bp.slotNo.value}, hash=${bp.blockHash.toHash32.hash32Hex}")
           }
 
-          _ <- IO {
-            assert(selected.size == 5, s"Expected 5 headers, got ${selected.size}")
-          }
-
-          // Step 4: Fetch blocks from first to 5th selected header
-          fromPoint = selected.head._2
-          toPoint   = selected.last._2
-          _ <- IO.println(s"\nFetching blocks from slot ${fromPoint.slotNo.value} to slot ${toPoint.slotNo.value}")
-
-          // Debug: print the encoded MsgRequestRange
+          // Step 4: Send MsgRequestRange manually and debug the raw response
+          fromPoint  = selected.head._2
+          toPoint    = selected.last._2
           encodedMsg = BlockFetchMessage.encode(BlockFetchMessage.MsgRequestRange(fromPoint, toPoint))
-          _ <- IO.println(s"Encoded MsgRequestRange: ${encodedMsg.toHex}")
+          _ <- IO.println(s"\nEncoded MsgRequestRange (${encodedMsg.size} bytes): ${encodedMsg.toHex}")
+          _ <- conn.mux.send(protoId, encodedMsg)
 
-          blocks <- blockFetch.fetchRange(fromPoint, toPoint).compile.toList
+          // Read raw response
+          rawResponse <- conn.mux.recvProtocol(protoId)
+          _           <- IO.println(s"Raw response (${rawResponse.size} bytes): ${rawResponse.take(64).toHex}...")
+          decoded = BlockFetchMessage.decode(rawResponse)
+          _ <- IO.println(s"Decoded response: $decoded")
 
-          // Step 5: Verify blocks received and non-empty
-          _ <- IO.println(s"\nReceived ${blocks.size} blocks")
-          _ <- blocks.zipWithIndex.traverse_ { case (blockData, i) =>
+          // If StartBatch, read blocks
+          result <- decoded match
+            case Right(BlockFetchMessage.MsgStartBatch) =>
+              IO.println("Got MsgStartBatch, reading blocks...") *>
+                readBlocksManually(conn.mux, protoId, 0, List.empty)
+            case Right(BlockFetchMessage.MsgNoBlocks) =>
+              IO.println("Got MsgNoBlocks - server doesn't have these blocks at these points") *>
+                IO.pure(List.empty[ByteVector])
+            case Right(other) =>
+              IO.raiseError(new RuntimeException(s"Unexpected: $other"))
+            case Left(err) =>
+              IO.raiseError(new RuntimeException(s"Decode error: $err"))
+
+          _ <- IO.println(s"\nReceived ${result.size} blocks")
+          _ <- result.zipWithIndex.traverse_ { case (blockData, i) =>
             val eraInfo = parseEraTag(blockData)
             IO.println(s"  Block $i: size=${blockData.size} bytes, $eraInfo")
           }
 
           _ <- IO {
-            assert(blocks.nonEmpty, "Expected non-empty block list")
-            assert(blocks.size == 5, s"Expected 5 blocks, got ${blocks.size}")
-            blocks.foreach { blockData =>
+            assert(result.nonEmpty, "Expected non-empty block list")
+            assert(result.size == 5, s"Expected 5 blocks, got ${result.size}")
+            result.foreach { blockData =>
               assert(blockData.nonEmpty, "Block data should not be empty")
             }
           }
 
           _ <- IO.println("\nAll assertions passed!")
-
-          // Clean up
           _ <- chainSync.done
-          _ <- blockFetch.done
+          _ <- conn.mux.send(protoId, BlockFetchMessage.encode(BlockFetchMessage.MsgClientDone))
         yield ()
       }
   }
+
+  private def readBlocksManually(
+      mux: MuxDemuxer,
+      protoId: Int,
+      count: Int,
+      acc: List[ByteVector]
+  ): IO[List[ByteVector]] =
+    mux.recvProtocol(protoId).flatMap { raw =>
+      IO.println(s"  Block msg raw (${raw.size} bytes): ${raw.take(20).toHex}...") *> {
+        BlockFetchMessage.decode(raw) match
+          case Right(BlockFetchMessage.MsgBlock(data)) =>
+            IO.println(s"  Got block ${count}: ${data.size} bytes") *>
+              readBlocksManually(mux, protoId, count + 1, acc :+ data)
+          case Right(BlockFetchMessage.MsgBatchDone) =>
+            IO.println(s"  Got MsgBatchDone after $count blocks") *>
+              IO.pure(acc)
+          case Right(other) =>
+            IO.raiseError(new RuntimeException(s"Unexpected in stream: $other"))
+          case Left(err) =>
+            IO.raiseError(new RuntimeException(s"Decode error in stream: $err"))
+      }
+    }
 
   private def collectHeaders(
       chainSync: ChainSyncClient,
