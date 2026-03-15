@@ -134,9 +134,9 @@ object HandshakeMessage:
         Right((v, offset + 5))
       else Left(s"unsupported additional info: $additional")
 
-  /** Build a MsgProposeVersions for N2N with versions 11-13. */
+  /** Build a MsgProposeVersions for N2N with versions 11-14. */
   def handshakeClient(networkMagic: Long): HandshakeMessage =
-    val versions = (11 to 13).map { v =>
+    val versions = (11 to 14).map { v =>
       v -> n2nVersionData(v, networkMagic)
     }.toMap
     HandshakeMessage.MsgProposeVersions(versions)

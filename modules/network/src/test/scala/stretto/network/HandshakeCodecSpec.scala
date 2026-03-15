@@ -21,14 +21,14 @@ class HandshakeCodecSpec extends FunSuite:
     val msg     = HandshakeMessage.handshakeClient(NetworkMagic.Preprod)
     val encoded = HandshakeMessage.encode(msg)
     // After array(2) + uint(0) we should have a map header
-    // map(3) for versions 11, 12, 13 = 0xa3
-    assertEquals(encoded(2) & 0xff, 0xa3)
+    // map(4) for versions 11, 12, 13, 14 = 0xa4
+    assertEquals(encoded(2) & 0xff, 0xa4)
   }
 
-  test("handshakeClient(1): produces MsgProposeVersions with versions 11-13") {
+  test("handshakeClient(1): produces MsgProposeVersions with versions 11-14") {
     val msg                                           = HandshakeMessage.handshakeClient(1L)
     val HandshakeMessage.MsgProposeVersions(versions) = msg: @unchecked
-    assertEquals(versions.keySet, Set(11, 12, 13))
+    assertEquals(versions.keySet, Set(11, 12, 13, 14))
   }
 
   test("handshakeClient: version data contains network magic") {
