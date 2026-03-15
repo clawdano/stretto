@@ -4,7 +4,7 @@ import cats.effect.IO
 import cats.syntax.all.*
 import munit.CatsEffectSuite
 import scodec.bits.ByteVector
-import stretto.core.Point
+import stretto.core.{Crypto, Point}
 import stretto.core.Types.*
 
 import scala.concurrent.duration.*
@@ -31,41 +31,62 @@ class BlockFetchIntegrationSpec extends CatsEffectSuite:
           intersect <- chainSync.findIntersect(List(Point.Origin))
           _         <- IO.println(s"Intersection result: $intersect")
 
-          // Step 2: First response after origin intersection is RollBackward
+          // Step 2: First response is RollBackward
           r0 <- chainSync.requestNext
           _  <- IO.println(s"Initial response: $r0")
 
-          // Step 3: Collect 7 headers
-          headers <- collectHeaders(chainSync, 7)
-          _       <- IO.println(s"\nCollected ${headers.size} headers")
+          // Step 3: Get first header (EBB) and debug hash computation
+          r1 <- chainSync.requestNext
+          _ <- r1 match
+            case ChainSyncResponse.RollForward(header, _) =>
+              debugHeaderHash(header, "EBB (header 1)")
+            case _ => IO.println(s"Unexpected: $r1")
 
-          // Use headers 2-6 (skip EBB at index 0, use regular Byron blocks)
-          selected = headers.drop(1).take(5)
-          _ <- IO.println(s"Selected ${selected.size} headers for BlockFetch")
+          // Get second header (first regular Byron block) and debug
+          r2 <- chainSync.requestNext
+          _ <- r2 match
+            case ChainSyncResponse.RollForward(header, _) =>
+              debugHeaderHash(header, "Byron block 1 (header 2)")
+            case _ => IO.println(s"Unexpected: $r2")
+
+          // Now collect a few more headers
+          headers <- collectHeaders(chainSync, 4)
+
+          // Combine headers 2-6 for BlockFetch
+          allHeaders = (r2 match
+            case ChainSyncResponse.RollForward(header, _) =>
+              HeaderParser.parse(header).toOption.map { meta =>
+                val bp: Point.BlockPoint = Point.BlockPoint(meta.slotNo, meta.blockHash)
+                (header, bp)
+              }
+            case _ => None
+          ).toList ++ headers
+
+          selected = allHeaders.take(5)
+          _ <- IO.println(s"\nSelected ${selected.size} points for BlockFetch:")
           _ <- selected.zipWithIndex.traverse_ { case ((_, bp), i) =>
             IO.println(s"  Point $i: slot=${bp.slotNo.value}, hash=${bp.blockHash.toHash32.hash32Hex}")
           }
 
-          // Step 4: Send MsgRequestRange manually and debug the raw response
-          fromPoint  = selected.head._2
-          toPoint    = selected.last._2
+          fromPoint = selected.head._2
+          toPoint   = selected.last._2
+          _ <- IO.println(s"\nFetching blocks from slot ${fromPoint.slotNo.value} to slot ${toPoint.slotNo.value}")
+
           encodedMsg = BlockFetchMessage.encode(BlockFetchMessage.MsgRequestRange(fromPoint, toPoint))
-          _ <- IO.println(s"\nEncoded MsgRequestRange (${encodedMsg.size} bytes): ${encodedMsg.toHex}")
+          _ <- IO.println(s"Encoded MsgRequestRange: ${encodedMsg.toHex}")
           _ <- conn.mux.send(protoId, encodedMsg)
 
-          // Read raw response
           rawResponse <- conn.mux.recvProtocol(protoId)
-          _           <- IO.println(s"Raw response (${rawResponse.size} bytes): ${rawResponse.take(64).toHex}...")
+          _           <- IO.println(s"Raw response: ${rawResponse.toHex}")
           decoded = BlockFetchMessage.decode(rawResponse)
-          _ <- IO.println(s"Decoded response: $decoded")
+          _ <- IO.println(s"Decoded: $decoded")
 
-          // If StartBatch, read blocks
           result <- decoded match
             case Right(BlockFetchMessage.MsgStartBatch) =>
-              IO.println("Got MsgStartBatch, reading blocks...") *>
+              IO.println("MsgStartBatch!") *>
                 readBlocksManually(conn.mux, protoId, 0, List.empty)
             case Right(BlockFetchMessage.MsgNoBlocks) =>
-              IO.println("Got MsgNoBlocks - server doesn't have these blocks at these points") *>
+              IO.println("MsgNoBlocks - hash mismatch suspected") *>
                 IO.pure(List.empty[ByteVector])
             case Right(other) =>
               IO.raiseError(new RuntimeException(s"Unexpected: $other"))
@@ -93,6 +114,57 @@ class BlockFetchIntegrationSpec extends CatsEffectSuite:
       }
   }
 
+  /** Debug hash computation by trying multiple approaches */
+  private def debugHeaderHash(wrappedHeader: ByteVector, label: String): IO[Unit] =
+    IO {
+      println(s"\n=== DEBUG: $label ===")
+      println(s"  Wrapped header size: ${wrappedHeader.size}")
+      println(s"  First 40 bytes: ${wrappedHeader.take(40).toHex}")
+
+      // Our computed hash via HeaderParser
+      val parsed = HeaderParser.parse(wrappedHeader)
+      println(s"  HeaderParser result: $parsed")
+
+      // Manual extraction: find tag24 content
+      // Byron header: [0, [[sub_tag, param], tag24(headerBytes)]]
+      // Let's scan for d818 (tag24)
+      var idx = 0
+      while idx < wrappedHeader.size.toInt - 1 do
+        val b0 = wrappedHeader(idx.toLong) & 0xff
+        val b1 = wrappedHeader((idx + 1).toLong) & 0xff
+        if b0 == 0xd8 && b1 == 0x18 then
+          println(s"  tag24 found at offset $idx")
+          val bstrOff = idx + 2
+          val bstrB   = wrappedHeader(bstrOff.toLong) & 0xff
+          val bstrAi  = bstrB & 0x1f
+          val bstrMaj = bstrB >> 5
+          if bstrMaj == 2 then
+            val (len, dataOff) =
+              if bstrAi < 24 then (bstrAi.toLong, bstrOff + 1)
+              else if bstrAi == 24 then ((wrappedHeader((bstrOff + 1).toLong) & 0xff).toLong, bstrOff + 2)
+              else if bstrAi == 25 then
+                val v =
+                  ((wrappedHeader((bstrOff + 1).toLong) & 0xff) << 8) | (wrappedHeader((bstrOff + 2).toLong) & 0xff)
+                (v.toLong, bstrOff + 3)
+              else (0L, bstrOff + 1)
+            val content = wrappedHeader.slice(dataOff.toLong, dataOff.toLong + len)
+            println(s"  tag24 bstr len: $len, content first 20: ${content.take(20).toHex}")
+
+            // Hash approaches
+            println(s"  H1 blake2b256(content)       = ${Crypto.blake2b256(content).toHex}")
+            println(
+              s"  H2 blake2b256(tag24+content)  = ${Crypto.blake2b256(wrappedHeader.slice(idx.toLong, dataOff.toLong + len)).toHex}"
+            )
+            println(
+              s"  H3 blake2b256(bstr+content)   = ${Crypto.blake2b256(wrappedHeader.slice(bstrOff.toLong, dataOff.toLong + len)).toHex}"
+            )
+            println(s"  H4 blake2b256(full_wrapped)   = ${Crypto.blake2b256(wrappedHeader).toHex}")
+          end if
+        end if
+        idx += 1
+      end while
+    }
+
   private def readBlocksManually(
       mux: MuxDemuxer,
       protoId: Int,
@@ -100,19 +172,17 @@ class BlockFetchIntegrationSpec extends CatsEffectSuite:
       acc: List[ByteVector]
   ): IO[List[ByteVector]] =
     mux.recvProtocol(protoId).flatMap { raw =>
-      IO.println(s"  Block msg raw (${raw.size} bytes): ${raw.take(20).toHex}...") *> {
-        BlockFetchMessage.decode(raw) match
-          case Right(BlockFetchMessage.MsgBlock(data)) =>
-            IO.println(s"  Got block ${count}: ${data.size} bytes") *>
-              readBlocksManually(mux, protoId, count + 1, acc :+ data)
-          case Right(BlockFetchMessage.MsgBatchDone) =>
-            IO.println(s"  Got MsgBatchDone after $count blocks") *>
-              IO.pure(acc)
-          case Right(other) =>
-            IO.raiseError(new RuntimeException(s"Unexpected in stream: $other"))
-          case Left(err) =>
-            IO.raiseError(new RuntimeException(s"Decode error in stream: $err"))
-      }
+      BlockFetchMessage.decode(raw) match
+        case Right(BlockFetchMessage.MsgBlock(data)) =>
+          IO.println(s"  Got block $count: ${data.size} bytes") *>
+            readBlocksManually(mux, protoId, count + 1, acc :+ data)
+        case Right(BlockFetchMessage.MsgBatchDone) =>
+          IO.println(s"  MsgBatchDone after $count blocks") *>
+            IO.pure(acc)
+        case Right(other) =>
+          IO.raiseError(new RuntimeException(s"Unexpected in stream: $other"))
+        case Left(err) =>
+          IO.raiseError(new RuntimeException(s"Decode error in stream: $err"))
     }
 
   private def collectHeaders(
