@@ -156,7 +156,7 @@ lazy val cli = project
     Docker / maintainer := "clawdano",
     dockerBaseImage := "eclipse-temurin:21-jre-alpine",
     dockerExposedPorts := Seq(3001),
-    dockerRepository := Some("clawdano"),
+    dockerRepository := Some("clawdanoai"),
     dockerLabels := Map(
       "org.opencontainers.image.source" -> "https://github.com/clawdano/stretto",
       "org.opencontainers.image.description" -> "Cardano node implementation in Scala 3",
