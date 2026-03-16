@@ -94,12 +94,14 @@ object RelayNode:
       )
 
     def loop(attempt: Int): IO[Nothing] =
-      syncOnce.handleErrorWith { err =>
-        logger.warn(
-          s"Upstream connection lost: ${err.getMessage}. " +
-            s"Reconnecting in ${RetryDelaySec}s (attempt $attempt)..."
-        ) *>
-          IO.sleep(RetryDelaySec.seconds)
-      } *> loop(attempt + 1)
+      syncOnce
+        .handleErrorWith { err =>
+          logger.warn(
+            s"Upstream connection lost: ${err.getMessage}. " +
+              s"Reconnecting in ${RetryDelaySec}s (attempt $attempt)..."
+          ) *>
+            IO.sleep(RetryDelaySec.seconds)
+        }
+        .flatMap(_ => IO.defer(loop(attempt + 1)))
 
-    loop(1)
+    IO.defer(loop(1))
