@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.1.0-SNAPSHOT] - 2026-03-15
 
 ### Added
+- **UTxO state & block applicator** — `UtxoState` (unspent output map), `BlockApplicator` applies blocks to UTxO (removes spent inputs, adds new outputs), works across all eras, 13 tests
 - **Block model & decoder** — ADTs for all eras (Byron EBB, Byron main, Shelley through Conway) with CBOR decoder supporting indefinite-length encoding, tx hash computation via blake2b256
 - **Block decoder conformance tests** — 15 tests using Pallas (Rust) test fixtures, verified tx counts, tx hashes, and fees across all 7 eras
 - **Block sync pipeline** — `sync-blocks` command downloads full blocks via BlockFetch alongside headers from ChainSync, storing both atomically in RocksDB
@@ -36,7 +37,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Preview network** — extend handshake to propose version 14 (preview nodes require v14+)
 
 ### Testing
-- 259 tests total (250 passing, 9 ignored integration tests)
+- 272 tests total (263 passing, 9 ignored integration tests)
 - Conformance test vectors sourced from ouroboros-network CDDL specs and Pallas (Rust)
 - Round-trip codec tests for all protocol messages (ChainSync, BlockFetch, Handshake, MuxFrame)
 - Low-level CBOR primitive tests (uint, bstr, array, map, tag, bool)
