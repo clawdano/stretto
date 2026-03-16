@@ -5,6 +5,8 @@ import com.comcast.ip4s.{Host, Port}
 import fs2.io.net.{Network, Socket}
 import scodec.bits.ByteVector
 
+import scala.concurrent.duration.*
+
 /** A multiplexed connection to a Cardano node. */
 final class MuxConnection private[network] (
     val socket: Socket[IO],
@@ -34,6 +36,8 @@ object MuxConnection:
       version <- Resource.eval(performHandshake(mux, networkMagic))
     yield new MuxConnection(socket, mux, version)
 
+  private val ConnectTimeout = 30.seconds
+
   private def openSocket(host: String, port: Int): Resource[IO, Socket[IO]] =
     val hostParsed = Host.fromString(host)
     val portParsed = Port.fromInt(port)
@@ -50,6 +54,21 @@ object MuxConnection:
             )
           )
         )
+
+  /** Connect with a timeout — prevents hanging on unresponsive peers. */
+  def connectWithTimeout(
+      host: String,
+      port: Int,
+      networkMagic: Long,
+      timeout: FiniteDuration = ConnectTimeout
+  ): Resource[IO, MuxConnection] =
+    Resource
+      .eval(connect(host, port, networkMagic).allocated.timeoutTo(timeout, IO.raiseError(
+        new RuntimeException(s"Connection to $host:$port timed out after $timeout")
+      )))
+      .flatMap { case (conn, release) =>
+        Resource.make(IO.pure(conn))(_ => release)
+      }
 
   private def performHandshake(
       mux: MuxDemuxer,

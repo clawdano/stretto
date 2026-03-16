@@ -110,7 +110,7 @@ object BlockSyncPipeline:
       batchSize: Int = 50
   ): IO[SyncProgress] =
     val syncer = new BlockSyncer(store)
-    MuxConnection.connect(host, port, networkMagic).use { conn =>
+    MuxConnection.connectWithTimeout(host, port, networkMagic).use { conn =>
       val chainSyncClient  = new ChainSyncClient(conn.mux)
       val blockFetchClient = new BlockFetchClient(conn.mux)
       val keepAlive        = new KeepAliveClient(conn.mux)
