@@ -154,8 +154,9 @@ lazy val cli = project
     Docker / packageName := "stretto",
     Docker / version := version.value,
     Docker / maintainer := "clawdano",
-    dockerBaseImage := "eclipse-temurin:21-jre-alpine",
+    dockerBaseImage := "eclipse-temurin:21-jre-jammy",
     dockerExposedPorts := Seq(3001),
+    dockerExposedVolumes := Seq("/data"),
     dockerRepository := Some("clawdanoai"),
     dockerLabels := Map(
       "org.opencontainers.image.source" -> "https://github.com/clawdano/stretto",
