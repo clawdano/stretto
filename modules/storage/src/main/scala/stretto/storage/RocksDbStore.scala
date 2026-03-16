@@ -205,6 +205,34 @@ final class RocksDbStore private (
     cfBlocks.close()
     db.close()
 
+  /** Get the point stored at a given block height, if any. */
+  def getPointByHeight(blockNo: BlockNo): IO[Option[Point.BlockPoint]] =
+    IO {
+      Option(db.get(cfByHeight, heightKey(blockNo))).map(decodePointKey)
+    }
+
+  /** Get the maximum stored block height, if any. */
+  def getMaxHeight: IO[Option[BlockNo]] =
+    IO {
+      val it = db.newIterator(cfByHeight)
+      try
+        it.seekToLast()
+        if it.isValid then
+          val key = it.key()
+          val bn =
+            ((key(0).toLong & 0xff) << 56) |
+              ((key(1).toLong & 0xff) << 48) |
+              ((key(2).toLong & 0xff) << 40) |
+              ((key(3).toLong & 0xff) << 32) |
+              ((key(4).toLong & 0xff) << 24) |
+              ((key(5).toLong & 0xff) << 16) |
+              ((key(6).toLong & 0xff) << 8) |
+              (key(7).toLong & 0xff)
+          Some(BlockNo(bn))
+        else None
+      finally it.close()
+    }
+
   def recentPoints(count: Int): IO[List[Point.BlockPoint]] =
     IO {
       val it = db.newIterator(cfByHeight)

@@ -1,6 +1,8 @@
 package stretto.node
 
 import cats.effect.IO
+import cats.syntax.all.*
+import fs2.concurrent.Topic
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import scodec.bits.ByteVector
 import stretto.core.{Point, Tip}
@@ -88,6 +90,118 @@ object BlockSyncPipeline:
           _ <- blockFetchClient.done
         yield result
       }
+    }
+
+  /**
+   * Run the block sync pipeline with an externally-managed store and topic.
+   *
+   * Used by RelayNode to publish ChainEvents to N2C subscribers.
+   */
+  def syncWithTopic(
+      host: String,
+      port: Int,
+      networkMagic: Long,
+      store: RocksDbStore,
+      maxBlocks: Long,
+      tipTopic: Topic[IO, ChainEvent],
+      onProgress: SyncProgress => IO[Unit],
+      progressInterval: Int = 500,
+      pipelineWindow: Int = 100,
+      batchSize: Int = 50
+  ): IO[SyncProgress] =
+    val syncer = new BlockSyncer(store)
+    MuxConnection.connect(host, port, networkMagic).use { conn =>
+      val chainSyncClient  = new ChainSyncClient(conn.mux)
+      val blockFetchClient = new BlockFetchClient(conn.mux)
+      val keepAlive        = new KeepAliveClient(conn.mux)
+      for
+        _        <- keepAlive.respondLoop.start
+        knownPts <- syncer.knownPoints
+        result <- pipelinedSyncLoopWithTopic(
+          chainSyncClient,
+          blockFetchClient,
+          syncer,
+          knownPts,
+          maxBlocks,
+          tipTopic,
+          onProgress,
+          progressInterval,
+          pipelineWindow,
+          batchSize
+        )
+        _ <- blockFetchClient.done
+      yield result
+    }
+
+  private def pipelinedSyncLoopWithTopic(
+      chainSyncClient: ChainSyncClient,
+      blockFetchClient: BlockFetchClient,
+      syncer: BlockSyncer,
+      knownPoints: List[Point],
+      maxBlocks: Long,
+      tipTopic: Topic[IO, ChainEvent],
+      onProgress: SyncProgress => IO[Unit],
+      progressInterval: Int,
+      pipelineWindow: Int,
+      batchSize: Int
+  ): IO[SyncProgress] =
+    val headerStream = chainSyncClient.pipelinedHeaderStream(knownPoints, pipelineWindow)
+
+    headerStream.zipWithIndex
+      .takeWhile { case (_, idx) => maxBlocks <= 0 || idx < maxBlocks }
+      .groupWithin(batchSize, scala.concurrent.duration.FiniteDuration(100, "ms"))
+      .evalScan(emptyProgress) { case (progress, chunk) =>
+        processBatchWithTopic(
+          blockFetchClient,
+          syncer,
+          progress,
+          chunk.toList,
+          tipTopic,
+          onProgress,
+          progressInterval
+        )
+      }
+      .compile
+      .last
+      .map(_.getOrElse(emptyProgress))
+      .flatTap(_ => chainSyncClient.done)
+
+  private def processBatchWithTopic(
+      blockFetchClient: BlockFetchClient,
+      syncer: BlockSyncer,
+      progress: SyncProgress,
+      batch: List[(ChainSyncResponse, Long)],
+      tipTopic: Topic[IO, ChainEvent],
+      onProgress: SyncProgress => IO[Unit],
+      progressInterval: Int
+  ): IO[SyncProgress] =
+    // Delegate to the regular processBatch logic, then publish events
+    processBatch(blockFetchClient, syncer, progress, batch, onProgress, progressInterval).flatTap { newProgress =>
+      // Publish chain events for the batch
+      val forwards = batch.collect { case (ChainSyncResponse.RollForward(header, tip), _) =>
+        (header, tip)
+      }
+      val lastForward = forwards.lastOption
+      val rollbacks = batch.collect { case (ChainSyncResponse.RollBackward(point, tip), _) =>
+        (point, tip)
+      }
+
+      // Publish rollback events
+      val rollbackPublish = rollbacks.traverse_ { case (point, tip) =>
+        tipTopic.publish1(ChainEvent.RolledBack(point, tip))
+      }
+
+      // Publish block added for the last block in this batch
+      val forwardPublish = lastForward match
+        case Some((header, tip)) =>
+          HeaderParser.parse(header) match
+            case Right(meta) =>
+              val bp: Point.BlockPoint = Point.BlockPoint(meta.slotNo, meta.blockHash)
+              tipTopic.publish1(ChainEvent.BlockAdded(bp, tip)).void
+            case Left(_) => IO.unit
+        case None => IO.unit
+
+      rollbackPublish *> forwardPublish
     }
 
   private def pipelinedSyncLoop(

@@ -3,7 +3,7 @@ package stretto.cli
 import cats.effect.{ExitCode, IO, IOApp}
 import cats.syntax.all.*
 import org.typelevel.log4cats.slf4j.Slf4jLogger
-import stretto.node.{BlockSyncPipeline, NetworkPreset, SyncPipeline}
+import stretto.node.{BlockSyncPipeline, NetworkPreset, RelayNode, SyncPipeline}
 
 import java.nio.file.{Path, Paths}
 
@@ -16,6 +16,7 @@ object Main extends IOApp:
     args match
       case "sync-headers" :: rest => runSyncHeaders(rest)
       case "sync-blocks" :: rest  => runSyncBlocks(rest)
+      case "relay" :: rest        => runRelay(rest)
       case "version" :: _         => IO.println("stretto 0.1.0-SNAPSHOT") *> IO.pure(ExitCode.Success)
       case "help" :: _ | Nil      => printUsage *> IO.pure(ExitCode.Success)
       case unknown :: _ =>
@@ -43,6 +44,24 @@ object Main extends IOApp:
             IO.println(s"Error: $err") *> IO.pure(ExitCode(2))
           case Right(resolved) =>
             executeSyncBlocks(resolved)
+        }
+
+  private def runRelay(args: List[String]): IO[ExitCode] =
+    parseRelayArgs(args, RelayConfig()) match
+      case Left(err) =>
+        IO.println(s"Error: $err") *> IO.println("") *> printRelayUsage *> IO.pure(ExitCode(2))
+      case Right(config) =>
+        resolveRelayConfig(config).flatMap {
+          case Left(err) =>
+            IO.println(s"Error: $err") *> IO.pure(ExitCode(2))
+          case Right(resolved) =>
+            RelayNode
+              .run(resolved)
+              .as(ExitCode.Success)
+              .handleErrorWith { err =>
+                logger.error(err)(s"Relay node terminated: ${err.getMessage}") *>
+                  IO.pure(ExitCode(1))
+              }
         }
 
   private val MaxRetries    = 10
@@ -225,7 +244,82 @@ object Main extends IOApp:
       maxBlocks: Long
   )
 
+  private case class RelayConfig(
+      network: Option[String] = None,
+      peerHost: Option[String] = None,
+      peerPort: Option[Int] = None,
+      listenHost: String = "127.0.0.1",
+      listenPort: Option[Int] = None,
+      dbPath: Option[String] = None,
+      maxClients: Int = 32,
+      networkMagic: Option[Long] = None
+  )
+
   // --- Arg parsing ---
+
+  private def parseRelayArgs(args: List[String], config: RelayConfig): Either[String, RelayConfig] =
+    args match
+      case Nil => Right(config)
+      case ("--network" | "-n") :: value :: rest =>
+        parseRelayArgs(rest, config.copy(network = Some(value)))
+      case ("--peer" | "-p") :: value :: rest =>
+        parsePeer(value).flatMap { case (h, p) =>
+          parseRelayArgs(rest, config.copy(peerHost = Some(h), peerPort = Some(p)))
+        }
+      case ("--listen" | "-l") :: value :: rest =>
+        parsePeer(value).flatMap { case (h, p) =>
+          parseRelayArgs(rest, config.copy(listenHost = h, listenPort = Some(p)))
+        }
+      case ("--db" | "-d") :: value :: rest =>
+        parseRelayArgs(rest, config.copy(dbPath = Some(value)))
+      case "--max-clients" :: value :: rest =>
+        value.toIntOption match
+          case Some(n) if n > 0 => parseRelayArgs(rest, config.copy(maxClients = n))
+          case _                => Left(s"Invalid max-clients: $value")
+      case "--magic" :: value :: rest =>
+        value.toLongOption match
+          case Some(n) => parseRelayArgs(rest, config.copy(networkMagic = Some(n)))
+          case None    => Left(s"Invalid magic: $value")
+      case ("--help" | "-h") :: _ =>
+        Left("")
+      case unknown :: _ =>
+        Left(s"Unknown option: $unknown")
+
+  private def resolveRelayConfig(config: RelayConfig): IO[Either[String, RelayNode.Config]] = IO {
+    val preset      = config.network.flatMap(NetworkPreset.fromName)
+    val networkName = config.network.getOrElse(preset.map(_.name).getOrElse("custom"))
+
+    val magic = config.networkMagic
+      .orElse(preset.map(_.networkMagic))
+      .toRight("No network specified. Use --network <mainnet|preprod|preview> or --magic <number>")
+
+    magic.flatMap { m =>
+      val (peerHost, peerPort) = (config.peerHost, config.peerPort) match
+        case (Some(h), Some(p)) => (h, p)
+        case _ =>
+          preset.flatMap(_.defaultPeers.headOption).getOrElse(("", 0))
+
+      if peerHost.isEmpty then Left("No upstream peer specified. Use --peer host:port")
+      else
+        val listenPort = config.listenPort.getOrElse(3001)
+        val db = config.dbPath
+          .map(Paths.get(_))
+          .getOrElse(Paths.get(".", "data", s"$networkName-relay"))
+
+        Right(
+          RelayNode.Config(
+            upstreamHost = peerHost,
+            upstreamPort = peerPort,
+            networkMagic = m,
+            networkName = networkName,
+            listenHost = config.listenHost,
+            listenPort = listenPort,
+            dbPath = db,
+            maxClients = config.maxClients
+          )
+        )
+    }
+  }
 
   private def parseSyncBlocksArgs(args: List[String], config: SyncBlocksConfig): Either[String, SyncBlocksConfig] =
     args match
@@ -343,6 +437,7 @@ object Main extends IOApp:
       |Commands:
       |  sync-headers   Sync block headers from a Cardano node
       |  sync-blocks    Sync full blocks (headers + bodies) from a Cardano node
+      |  relay          Run a lightweight N2C relay node
       |  version        Print version
       |  help           Show this help
       |""".stripMargin
@@ -384,5 +479,27 @@ object Main extends IOApp:
       |  stretto sync-blocks --network preprod --peer panic-station:30010
       |  stretto sync-blocks --network preprod --peer panic-station:30010 --max-blocks 100
       |  stretto sync-blocks --peer custom-node:3001 --magic 42 --db ./mydata
+      |""".stripMargin
+  )
+
+  private def printRelayUsage: IO[Unit] = IO.println(
+    """Usage: stretto relay [options]
+      |
+      |Run a lightweight N2C relay node. Syncs blocks from an upstream N2N peer
+      |and serves them to local N2C clients via ChainSync.
+      |
+      |Options:
+      |  -n, --network <name>       Network: mainnet, preprod, preview
+      |  -p, --peer <host:port>     Upstream N2N peer address
+      |  -l, --listen <host:port>   N2C listen address (default: 127.0.0.1:3001)
+      |  -d, --db <path>            Database directory (default: ./data/<network>-relay)
+      |      --max-clients <n>      Max concurrent N2C clients (default: 32)
+      |      --magic <number>       Custom network magic (overrides --network)
+      |  -h, --help                 Show this help
+      |
+      |Examples:
+      |  stretto relay --network preprod --peer panic-station:30010
+      |  stretto relay --network preprod --peer panic-station:30010 --listen 127.0.0.1:3001
+      |  stretto relay --network mainnet --peer relay:3001 --listen 0.0.0.0:3001 --max-clients 64
       |""".stripMargin
   )

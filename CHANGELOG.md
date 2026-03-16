@@ -4,9 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.1.0-SNAPSHOT] - 2026-03-15
+## [0.1.0-SNAPSHOT] - 2026-03-16
 
 ### Added
+- **N2C ChainSync relay node** — lightweight relay: syncs blocks from upstream N2N peer, serves them to local N2C clients via ChainSync (protocol ID 5)
+- **N2C Handshake responder** — server-side N2C handshake with versions V16-V19 (bit-15 offset: 32784-32787), MsgProposeVersions decoder, version negotiation
+- **ChainSyncServer** — per-client N2C server with cursor tracking, FindIntersect/RequestNext handling, MsgRollForward with era-wrapped blocks (no tag24), tip-following via fs2 Topic subscription
+- **ChainEvent + Topic** — `ChainEvent.BlockAdded`/`RolledBack` enum, fs2 `Topic[IO, ChainEvent]` for zero-overhead tip broadcast to N2C subscribers
+- **N2CListener** — TCP server accepting N2C connections, `Semaphore[IO]` gating max 32 clients (configurable), per-client handler fibers
+- **N2CConnectionHandler** — per-client lifecycle: MuxDemuxer creation, N2C handshake (30s timeout), ChainSync server loop
+- **RelayNode** — orchestrator: RocksDB + Topic + upstream N2N sync + N2C listener running concurrently, infinite upstream auto-reconnect
+- **BlockSyncPipeline.syncWithTopic** — variant that publishes ChainEvents to Topic after each batch write, used by relay node
+- **RocksDbStore** — `getPointByHeight`, `getMaxHeight` methods for serving blocks by chain height
+- **CLI** — `stretto relay` command with `--network`, `--peer`, `--listen`, `--db`, `--max-clients`, `--magic` options; binds 127.0.0.1 by default
 - **UTxO state & block applicator** — `UtxoState` (unspent output map), `BlockApplicator` applies blocks to UTxO (removes spent inputs, adds new outputs), works across all eras, 13 tests
 - **Block model & decoder** — ADTs for all eras (Byron EBB, Byron main, Shelley through Conway) with CBOR decoder supporting indefinite-length encoding, tx hash computation via blake2b256
 - **Block decoder conformance tests** — 15 tests using Pallas (Rust) test fixtures, verified tx counts, tx hashes, and fees across all 7 eras
@@ -37,7 +47,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Preview network** — extend handshake to propose version 14 (preview nodes require v14+)
 
 ### Testing
-- 272 tests total (263 passing, 9 ignored integration tests)
+- 296 tests total (287 passing, 9 ignored integration tests)
+- N2C handshake: 11 tests (version constants, encoding, decode, negotiation)
+- ChainEvent topic: 3 tests (publish/subscribe, multi-subscriber broadcast)
+- ChainSync server: 8 tests (CBOR encoding, protocol IDs, N2C format verification)
+- RelayNode config: 2 tests
 - Conformance test vectors sourced from ouroboros-network CDDL specs and Pallas (Rust)
 - Round-trip codec tests for all protocol messages (ChainSync, BlockFetch, Handshake, MuxFrame)
 - Low-level CBOR primitive tests (uint, bstr, array, map, tag, bool)
