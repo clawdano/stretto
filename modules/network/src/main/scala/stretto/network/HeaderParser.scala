@@ -106,7 +106,10 @@ object HeaderParser:
       // Convention: EBB slot = epoch * 21600 (Byron epoch length)
       SlotNo(epochId * 21600L)
 
-  /** Byron main: header[3] = consensus_data, consensus_data[0] = [epoch, slot]. */
+  /**
+   * Byron main: header[3] = consensus_data, consensus_data[0] = [epoch, relativeSlot].
+   * Absolute slot = epoch * 21600 + relativeSlot (Byron has 21600 slots per epoch).
+   */
   private def extractByronSlot(headerBytes: ByteVector): Either[String, SlotNo] =
     for
       (_, afterArr)   <- readArrayHeader(headerBytes, 0)
@@ -115,11 +118,11 @@ object HeaderParser:
       (_, afterElem2) <- skipItem(headerBytes, afterElem1) // body_proof
       // consensus_data = [[epoch, slot], pubKey, difficulty, ...]
       (_, afterCdArr) <- readArrayHeader(headerBytes, afterElem2)
-      // First element is slotId = [epoch, slot]
+      // First element is slotId = [epoch, relativeSlot]
       (_, afterSlotIdArr) <- readArrayHeader(headerBytes, afterCdArr)
-      (_, afterEpoch)     <- skipItem(headerBytes, afterSlotIdArr) // epoch
-      (slot, _)           <- readUInt(headerBytes, afterEpoch)     // slot
-    yield SlotNo(slot)
+      (epoch, afterEpoch) <- readUInt(headerBytes, afterSlotIdArr) // epoch
+      (relSlot, _)        <- readUInt(headerBytes, afterEpoch)     // relative slot within epoch
+    yield SlotNo(epoch * 21600L + relSlot)
 
   /** Shelley+: header[0] = header_body array, header_body[1] = slot. */
   private def extractShelleySlot(headerBytes: ByteVector): Either[String, SlotNo] =
