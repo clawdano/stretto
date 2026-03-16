@@ -140,6 +140,7 @@ lazy val node = project
 lazy val cli = project
   .in(file("modules/cli"))
   .dependsOn(node)
+  .enablePlugins(JavaAppPackaging, DockerPlugin)
   .settings(commonSettings)
   .settings(
     name := "stretto-cli",
@@ -148,5 +149,19 @@ lazy val cli = project
     libraryDependencies ++= Seq(
       "org.typelevel" %% "log4cats-slf4j" % log4catsVersion,
       "ch.qos.logback" % "logback-classic" % logbackVersion % Runtime,
+    ),
+    // Docker settings
+    Docker / packageName := "stretto",
+    Docker / version := version.value,
+    Docker / maintainer := "clawdano",
+    dockerBaseImage := "eclipse-temurin:21-jre-alpine",
+    dockerExposedPorts := Seq(3001),
+    dockerRepository := Some("clawdano"),
+    dockerLabels := Map(
+      "org.opencontainers.image.source" -> "https://github.com/clawdano/stretto",
+      "org.opencontainers.image.description" -> "Cardano node implementation in Scala 3",
+    ),
+    dockerEnvVars := Map(
+      "JAVA_OPTS" -> "-Xmx512m",
     ),
   )
