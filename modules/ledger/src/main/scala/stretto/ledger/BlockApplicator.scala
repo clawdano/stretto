@@ -4,14 +4,18 @@ import stretto.core.*
 import stretto.core.Types.*
 
 /**
- * Applies blocks to the UTxO state.
+ * Applies blocks to the UTxO state with validation.
  *
  * For each transaction in a block:
- *   1. Remove spent inputs from the UTxO set
- *   2. Add new outputs to the UTxO set (keyed by tx hash + index)
+ *   1. Validate against ledger rules (value preservation, fees, TTL, min UTxO)
+ *   2. Remove spent inputs from the UTxO set
+ *   3. Add new outputs to the UTxO set (keyed by tx hash + index)
  *
  * Returns the updated state and any validation errors encountered.
  * Currently permissive — logs errors but continues processing.
+ * A strict mode can be added later that rejects invalid transactions.
+ *
+ * Reference: Shelley formal spec §9 (UTxO transition), §10 (fees)
  */
 object BlockApplicator:
 
@@ -28,28 +32,57 @@ object BlockApplicator:
   enum ApplyError:
     case MissingInput(txId: TxHash, input: TxInput)
     case DuplicateOutput(txId: TxHash, index: Long)
+    case Validation(error: TransactionValidation.ValidationError)
 
-  /** Apply a parsed block to the UTxO state. */
-  def apply(state: UtxoState, block: Block): ApplyResult =
+  /**
+   * Apply a parsed block to the UTxO state.
+   *
+   * @param state       current UTxO state
+   * @param block       parsed block to apply
+   * @param currentSlot the slot of this block (for TTL validation)
+   * @param params      protocol parameters for this era (None = skip validation)
+   */
+  def apply(
+      state: UtxoState,
+      block: Block,
+      currentSlot: SlotNo = SlotNo(0L),
+      params: Option[ProtocolParameters] = None
+  ): ApplyResult =
     block match
       case Block.ByronEbBlock(_, _) =>
         // EBBs have no transactions
         ApplyResult(state, 0, 0, 0, Vector.empty)
 
       case Block.ByronBlock(_, body, _) =>
-        applyByronTxs(state, body.txPayload)
+        applyByronTxs(state, body.txPayload, params)
 
-      case Block.ShelleyBlock(_, _, txBodies, _, _, _) =>
-        applyShelleyTxs(state, txBodies)
+      case Block.ShelleyBlock(era, header, txBodies, _, _, _) =>
+        val effectiveSlot   = if currentSlot.value > 0 then currentSlot else header.slotNo
+        val effectiveParams = params.orElse(Some(ProtocolParameters.forEra(era)))
+        applyShelleyTxs(state, txBodies, effectiveSlot, effectiveParams)
+
+  /** Backward-compatible overload without validation params. */
+  def apply(state: UtxoState, block: Block): ApplyResult =
+    apply(state, block, SlotNo(0L), None)
 
   /** Apply Byron transactions to UTxO state. */
-  private def applyByronTxs(state: UtxoState, txs: Vector[ByronTx]): ApplyResult =
+  private def applyByronTxs(
+      state: UtxoState,
+      txs: Vector[ByronTx],
+      params: Option[ProtocolParameters]
+  ): ApplyResult =
     var utxos          = state.utxos
     var inputsConsumed = 0
     var outputsCreated = 0
     var errors         = Vector.empty[ApplyError]
 
     txs.foreach { tx =>
+      // Validate if params provided
+      params.foreach { p =>
+        val validationErrors = TransactionValidation.validateByronTx(tx, utxos)
+        errors = errors ++ validationErrors.map(ApplyError.Validation.apply)
+      }
+
       // 1. Remove spent inputs
       tx.inputs.foreach { input =>
         val utxoKey = TxInput(input.txId, input.index)
@@ -70,7 +103,12 @@ object BlockApplicator:
     ApplyResult(UtxoState(utxos), txs.size, inputsConsumed, outputsCreated, errors)
 
   /** Apply Shelley+ transactions to UTxO state. */
-  private def applyShelleyTxs(state: UtxoState, txBodies: Vector[TransactionBody]): ApplyResult =
+  private def applyShelleyTxs(
+      state: UtxoState,
+      txBodies: Vector[TransactionBody],
+      currentSlot: SlotNo,
+      params: Option[ProtocolParameters]
+  ): ApplyResult =
     var utxos          = state.utxos
     var inputsConsumed = 0
     var outputsCreated = 0
@@ -79,6 +117,13 @@ object BlockApplicator:
     txBodies.foreach { tx =>
       // Compute tx hash from raw CBOR
       val txHash = TxHash(Hash32.unsafeFrom(Crypto.blake2b256(tx.rawCbor)))
+
+      // Validate if params provided
+      params.foreach { p =>
+        val validationErrors =
+          TransactionValidation.validateShelleyTx(tx, txHash, utxos, p, currentSlot)
+        errors = errors ++ validationErrors.map(ApplyError.Validation.apply)
+      }
 
       // 1. Remove spent inputs
       tx.inputs.foreach { input =>

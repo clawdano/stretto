@@ -17,6 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **BlockSyncPipeline.syncWithTopic** — variant that publishes ChainEvents to Topic after each batch write, used by relay node
 - **RocksDbStore** — `getPointByHeight`, `getMaxHeight` methods for serving blocks by chain height
 - **CLI** — `stretto relay` command with `--network`, `--peer`, `--listen`, `--db`, `--max-clients`, `--magic` options; binds 127.0.0.1 by default
+- **Transaction validation** — `TransactionValidation` with 6 rules: value preservation (Shelley §9.1), fee adequacy (§10.2), TTL expiry (§8.1), min UTxO (§9.2), max tx size, input existence
+- **Protocol parameters** — `ProtocolParameters` per era (Byron through Conway) with minFeeA/B, minUtxoValue, coinsPerUtxoByte, maxTxSize
+- **BlockApplicator** — now runs validation during block application (permissive mode: logs errors, continues processing)
 - **UTxO state & block applicator** — `UtxoState` (unspent output map), `BlockApplicator` applies blocks to UTxO (removes spent inputs, adds new outputs), works across all eras, 13 tests
 - **Block model & decoder** — ADTs for all eras (Byron EBB, Byron main, Shelley through Conway) with CBOR decoder supporting indefinite-length encoding, tx hash computation via blake2b256
 - **Block decoder conformance tests** — 15 tests using Pallas (Rust) test fixtures, verified tx counts, tx hashes, and fees across all 7 eras
