@@ -63,9 +63,14 @@ object MuxConnection:
       timeout: FiniteDuration = ConnectTimeout
   ): Resource[IO, MuxConnection] =
     Resource
-      .eval(connect(host, port, networkMagic).allocated.timeoutTo(timeout, IO.raiseError(
-        new RuntimeException(s"Connection to $host:$port timed out after $timeout")
-      )))
+      .eval(
+        connect(host, port, networkMagic).allocated.timeoutTo(
+          timeout,
+          IO.raiseError(
+            new RuntimeException(s"Connection to $host:$port timed out after $timeout")
+          )
+        )
+      )
       .flatMap { case (conn, release) =>
         Resource.make(IO.pure(conn))(_ => release)
       }

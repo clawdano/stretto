@@ -29,7 +29,8 @@ object RelayNode:
       listenHost: String,
       listenPort: Int,
       dbPath: Path,
-      maxClients: Int = 32
+      maxClients: Int = 32,
+      keepAliveInterval: FiniteDuration = 10.seconds
   )
 
   private val RetryDelaySec = 5
@@ -84,6 +85,7 @@ object RelayNode:
         store = store,
         maxBlocks = 0L,
         tipTopic = tipTopic,
+        keepAliveInterval = config.keepAliveInterval,
         onProgress = progress =>
           logger.info(
             s"Sync: ${progress.blocksStored} blocks " +

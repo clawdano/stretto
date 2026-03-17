@@ -252,7 +252,8 @@ object Main extends IOApp:
       listenPort: Option[Int] = None,
       dbPath: Option[String] = None,
       maxClients: Int = 32,
-      networkMagic: Option[Long] = None
+      networkMagic: Option[Long] = None,
+      keepAliveInterval: Int = 10
   )
 
   // --- Arg parsing ---
@@ -280,6 +281,10 @@ object Main extends IOApp:
         value.toLongOption match
           case Some(n) => parseRelayArgs(rest, config.copy(networkMagic = Some(n)))
           case None    => Left(s"Invalid magic: $value")
+      case "--keep-alive-interval" :: value :: rest =>
+        value.toIntOption match
+          case Some(n) if n > 0 => parseRelayArgs(rest, config.copy(keepAliveInterval = n))
+          case _                => Left(s"Invalid keep-alive-interval: $value (must be positive integer seconds)")
       case ("--help" | "-h") :: _ =>
         Left("")
       case unknown :: _ =>
@@ -315,7 +320,8 @@ object Main extends IOApp:
             listenHost = config.listenHost,
             listenPort = listenPort,
             dbPath = db,
-            maxClients = config.maxClients
+            maxClients = config.maxClients,
+            keepAliveInterval = scala.concurrent.duration.FiniteDuration(config.keepAliveInterval.toLong, "s")
           )
         )
     }
@@ -494,6 +500,7 @@ object Main extends IOApp:
       |  -l, --listen <host:port>   N2C listen address (default: 127.0.0.1:3001)
       |  -d, --db <path>            Database directory (default: ./data/<network>-relay)
       |      --max-clients <n>      Max concurrent N2C clients (default: 32)
+      |      --keep-alive-interval <s>  KeepAlive ping interval in seconds (default: 10)
       |      --magic <number>       Custom network magic (overrides --network)
       |  -h, --help                 Show this help
       |

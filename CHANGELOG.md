@@ -45,12 +45,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 - **Mux write contention** — add `Semaphore` to serialize concurrent socket writes from ChainSync + BlockFetch, preventing frame interleaving
-- **KeepAlive support** — respond to peer KeepAlive pings to prevent timeout disconnections during large block downloads
+- **KeepAlive client (initiator)** — TCP connection initiator now correctly sends periodic MsgKeepAlive pings (default 10s, configurable via `--keep-alive-interval`), preventing peer timeout disconnections. Previous implementation was a responder waiting for pings that never arrived.
 - **Byron header hash** — prepend `0x82 + sub_tag` before hashing to match cardano-ledger-byron's `wrapBoundaryBytes`/`wrapHeaderBytes`
 - **Preview network** — extend handshake to propose version 14 (preview nodes require v14+)
 
 ### Testing
-- 296 tests total (287 passing, 9 ignored integration tests)
+- 305 tests total (296 passing, 9 ignored integration tests)
 - N2C handshake: 11 tests (version constants, encoding, decode, negotiation)
 - ChainEvent topic: 3 tests (publish/subscribe, multi-subscriber broadcast)
 - ChainSync server: 8 tests (CBOR encoding, protocol IDs, N2C format verification)

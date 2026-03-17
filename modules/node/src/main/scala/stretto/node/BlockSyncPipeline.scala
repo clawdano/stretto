@@ -74,7 +74,7 @@ object BlockSyncPipeline:
         val blockFetchClient = new BlockFetchClient(conn.mux)
         val keepAlive        = new KeepAliveClient(conn.mux)
         for
-          _        <- keepAlive.respondLoop.start
+          _        <- keepAlive.keepAliveLoop.start
           knownPts <- syncer.knownPoints
           result <- pipelinedSyncLoop(
             chainSyncClient,
@@ -105,6 +105,7 @@ object BlockSyncPipeline:
       maxBlocks: Long,
       tipTopic: Topic[IO, ChainEvent],
       onProgress: SyncProgress => IO[Unit],
+      keepAliveInterval: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(10, "s"),
       progressInterval: Int = 500,
       pipelineWindow: Int = 100,
       batchSize: Int = 50
@@ -113,9 +114,9 @@ object BlockSyncPipeline:
     MuxConnection.connectWithTimeout(host, port, networkMagic).use { conn =>
       val chainSyncClient  = new ChainSyncClient(conn.mux)
       val blockFetchClient = new BlockFetchClient(conn.mux)
-      val keepAlive        = new KeepAliveClient(conn.mux)
+      val keepAlive        = new KeepAliveClient(conn.mux, keepAliveInterval)
       for
-        _        <- keepAlive.respondLoop.start
+        _        <- keepAlive.keepAliveLoop.start
         knownPts <- syncer.knownPoints
         result <- pipelinedSyncLoopWithTopic(
           chainSyncClient,

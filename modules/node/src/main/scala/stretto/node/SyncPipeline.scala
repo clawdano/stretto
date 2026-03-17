@@ -54,7 +54,7 @@ object SyncPipeline:
         val client    = new ChainSyncClient(conn.mux)
         val keepAlive = new KeepAliveClient(conn.mux)
         for
-          _        <- keepAlive.respondLoop.start
+          _        <- keepAlive.keepAliveLoop.start
           knownPts <- syncer.knownPoints
           result <- pipelinedSyncLoop(
             client,
