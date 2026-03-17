@@ -1,6 +1,7 @@
 package stretto.network
 
-import cats.effect.IO
+import cats.effect.{Clock, IO}
+import org.typelevel.log4cats.slf4j.Slf4jLogger
 import scodec.bits.ByteVector
 
 /**
@@ -19,6 +20,7 @@ import scodec.bits.ByteVector
  */
 final class KeepAliveClient(mux: MuxDemuxer):
 
+  private val logger  = Slf4jLogger.getLoggerFromName[IO]("stretto.network.KeepAlive")
   private val protoId = MiniProtocolId.KeepAlive.id
 
   /** Receive a KeepAlive message from the peer. */
@@ -44,14 +46,28 @@ final class KeepAliveClient(mux: MuxDemuxer):
             // Extract cookie and respond with [1, cookie]
             val cookie   = extractCookie(payload)
             val response = encodeMsgKeepAliveResponse(cookie)
-            sendResponse(response) *> respondLoop
-          case _ =>
-            // Unknown message or MsgDone — stop
-            IO.unit
+            for
+              recvTime <- Clock[IO].monotonic
+              _        <- logger.debug(s"Received MsgKeepAlive cookie=$cookie at ${recvTime.toMillis}ms")
+              _        <- sendResponse(response)
+              sentTime <- Clock[IO].monotonic
+              delay = (sentTime - recvTime).toMillis
+              _ <- if delay > 100 then
+                logger.warn(s"KeepAlive response delayed ${delay}ms (cookie=$cookie)")
+              else
+                logger.debug(s"KeepAlive response sent in ${delay}ms (cookie=$cookie)")
+              _ <- respondLoop
+            yield ()
+          case Some(other) =>
+            logger.warn(s"KeepAlive unexpected tag=$other, payload=${payload.take(16).toHex}") *>
+              IO.unit
+          case None =>
+            logger.warn(s"KeepAlive failed to parse tag, payload=${payload.take(16).toHex}") *>
+              IO.unit
       }
-      .handleErrorWith { _ =>
+      .handleErrorWith { err =>
         // Connection closed — normal termination
-        IO.unit
+        logger.debug(s"KeepAlive loop ended: ${err.getMessage}")
       }
 
   /** Parse the first element of a CBOR array to get the message tag. */

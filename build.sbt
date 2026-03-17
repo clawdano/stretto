@@ -75,6 +75,7 @@ lazy val network = project
     libraryDependencies ++= Seq(
       "co.fs2" %% "fs2-core" % fs2Version,
       "co.fs2" %% "fs2-io" % fs2Version,
+      "org.typelevel" %% "log4cats-slf4j" % log4catsVersion,
     ),
   )
 
