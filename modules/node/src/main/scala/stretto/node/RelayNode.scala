@@ -52,6 +52,7 @@ object RelayNode:
         _        <- logger.info(s"Database: ${config.dbPath}")
         _        <- logger.info(s"Max N2C clients: ${config.maxClients}")
         // Start upstream sync and N2C listener concurrently
+        genesis = GenesisConfig.forNetwork(config.networkName)
         result <- IO
           .both(
             upstreamSyncLoop(config, store, tipTopic),
@@ -61,7 +62,8 @@ object RelayNode:
               store,
               tipTopic,
               config.networkMagic,
-              config.maxClients
+              config.maxClients,
+              genesis
             )
           )
           .map(_._2) // Both return Nothing

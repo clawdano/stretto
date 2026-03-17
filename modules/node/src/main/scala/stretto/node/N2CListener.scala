@@ -35,7 +35,8 @@ object N2CListener:
       store: RocksDbStore,
       tipTopic: Topic[IO, ChainEvent],
       networkMagic: Long,
-      maxClients: Int = 32
+      maxClients: Int = 32,
+      genesis: GenesisConfig = GenesisConfig.Preprod
   ): IO[Nothing] =
     val hostParsed = Host.fromString(host)
     val portParsed = Port.fromInt(port)
@@ -57,7 +58,7 @@ object N2CListener:
                     addr <- clientAddr
                     _    <- logger.info(s"N2C client connected: $addr")
                     _ <- N2CConnectionHandler
-                      .handle(socket, store, tipTopic, networkMagic)
+                      .handle(socket, store, tipTopic, networkMagic, genesis)
                       .guarantee(
                         clientAddr
                           .flatMap(a => logger.info(s"N2C client disconnected: $a"))

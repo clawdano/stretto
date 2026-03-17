@@ -32,7 +32,8 @@ object N2CConnectionHandler:
       socket: Socket[IO],
       store: RocksDbStore,
       tipTopic: Topic[IO, ChainEvent],
-      networkMagic: Long
+      networkMagic: Long,
+      genesis: GenesisConfig
   ): IO[Unit] =
     for
       mux <- MuxDemuxer(socket)
@@ -43,6 +44,7 @@ object N2CConnectionHandler:
           IO.raiseError(new RuntimeException("N2C handshake timed out"))
         )
       _ <- logger.info(s"N2C handshake accepted version $version")
-      server = new ChainSyncServer(mux, store, tipTopic)
-      _ <- server.serve
+      chainSync = new ChainSyncServer(mux, store, tipTopic)
+      lsqServer = new LocalStateQueryServer(mux, store, genesis)
+      _ <- IO.both(chainSync.serve, lsqServer.serve).void
     yield ()

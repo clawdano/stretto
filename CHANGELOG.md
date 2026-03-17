@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.1.0-SNAPSHOT] - 2026-03-16
 
 ### Added
+- **N2C LocalStateQuery server** — protocol ID 7, supports Acquire/Release/Query lifecycle with GetSystemStart, GetChainBlockNo, GetChainPoint, GetCurrentEra, GetEpochNo, GetLedgerTip, GetCurrentPParams, GetEraSummaries; hardcoded Conway protocol parameters; per-network GenesisConfig (mainnet/preprod/preview)
 - **N2C ChainSync relay node** — lightweight relay: syncs blocks from upstream N2N peer, serves them to local N2C clients via ChainSync (protocol ID 5)
 - **N2C Handshake responder** — server-side N2C handshake with versions V16-V19 (bit-15 offset: 32784-32787), MsgProposeVersions decoder, version negotiation
 - **ChainSyncServer** — per-client N2C server with cursor tracking, FindIntersect/RequestNext handling, MsgRollForward with era-wrapped blocks (no tag24), tip-following via fs2 Topic subscription
@@ -50,7 +51,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Preview network** — extend handshake to propose version 14 (preview nodes require v14+)
 
 ### Testing
-- 305 tests total (296 passing, 9 ignored integration tests)
+- 322 tests total (313 passing, 9 ignored integration tests)
+- LocalStateQuery: 17 tests (GenesisConfig epoch calculation, CBOR message encoding, protocol IDs)
 - N2C handshake: 11 tests (version constants, encoding, decode, negotiation)
 - ChainEvent topic: 3 tests (publish/subscribe, multi-subscriber broadcast)
 - ChainSync server: 8 tests (CBOR encoding, protocol IDs, N2C format verification)
