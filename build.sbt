@@ -11,6 +11,7 @@ val circeVersion = "0.14.10"
 val log4catsVersion = "2.7.0"
 val logbackVersion = "1.5.16"
 val bouncyCastleVersion = "1.80"
+val jnaVersion = "5.16.0"
 
 ThisBuild / organization := "io.github.clawdano"
 ThisBuild / version := "0.1.0-SNAPSHOT"
@@ -35,7 +36,7 @@ lazy val commonSettings = Seq(
 
 lazy val root = project
   .in(file("."))
-  .aggregate(core, serialization, network, consensus, ledger, mempool, storage, node, cli)
+  .aggregate(core, serialization, network, consensus, ledger, mempool, storage, node, cli, kes)
   .settings(
     name := "stretto",
     publish / skip := true,
@@ -51,6 +52,7 @@ lazy val core = project
       "org.scodec" %% "scodec-bits" % scodecBitsVersion,
       "org.scodec" %% "scodec-core" % scodecCoreVersion,
       "org.bouncycastle" % "bcprov-jdk18on" % bouncyCastleVersion,
+      "net.java.dev.jna" % "jna" % jnaVersion,
     ),
   )
 
@@ -79,9 +81,25 @@ lazy val network = project
     ),
   )
 
+/** Standalone KES (Key Evolving Signature) library for Cardano.
+  * Package: cardano.kes — designed for extraction as independent open-source library.
+  * Implements CompactSum6KES verification (pure Scala, minimal deps).
+  */
+lazy val kes = project
+  .in(file("modules/kes"))
+  .settings(commonSettings)
+  .settings(
+    name := "cardano-kes",
+    organization := "io.github.clawdano",
+    libraryDependencies ++= Seq(
+      "org.scodec" %% "scodec-bits" % scodecBitsVersion,
+      "org.bouncycastle" % "bcprov-jdk18on" % bouncyCastleVersion,
+    ),
+  )
+
 lazy val consensus = project
   .in(file("modules/consensus"))
-  .dependsOn(core, ledger, network)
+  .dependsOn(core, kes, ledger, network)
   .settings(commonSettings)
   .settings(
     name := "stretto-consensus",

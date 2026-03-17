@@ -329,10 +329,58 @@ object BlockDecoder:
               .map(_._1)
         }
 
+  /** Decode a VRF cert: 2-element array [proof, output]. */
+  private def decodeVrfCert(bytes: ByteVector, offset: Int): Either[String, (VrfCert, Int)] =
+    for
+      (arrLen, afterArr) <- readArrayHeader(bytes, offset)
+      _ <- require(arrLen == 2 || arrLen == IndefiniteLength, s"VRF cert expected 2-element array, got $arrLen")
+      (output, afterOutput) <- readByteString(bytes, afterArr)
+      (proof, afterProof)   <- readByteString(bytes, afterOutput)
+      afterEnd              <- if arrLen == IndefiniteLength then consumeBreak(bytes, afterProof) else Right(afterProof)
+    yield (VrfCert(proof = proof, output = output), afterEnd)
+
+  /**
+   * Decode an operational cert.
+   * TPraos (Shelley-Alonzo): 4 flat fields in header body (hot_vkey, counter, kes_period, cold_sig).
+   * Praos (Babbage+): 4-element array [hot_vkey, counter, kes_period, cold_sig].
+   */
+  private def decodeOperationalCertFlat(bytes: ByteVector, offset: Int): Either[String, (OperationalCert, Int)] =
+    for
+      (hotVkey, afterHot)      <- readByteString(bytes, offset)
+      (counter, afterCounter)  <- readUInt(bytes, afterHot)
+      (kesPeriod, afterPeriod) <- readUInt(bytes, afterCounter)
+      (coldSig, afterSig)      <- readByteString(bytes, afterPeriod)
+    yield (OperationalCert(hotVkey, counter, kesPeriod, coldSig), afterSig)
+
+  private def decodeOperationalCertArray(bytes: ByteVector, offset: Int): Either[String, (OperationalCert, Int)] =
+    for
+      (arrLen, afterArr) <- readArrayHeader(bytes, offset)
+      _ <- require(arrLen == 4 || arrLen == IndefiniteLength, s"OCert expected 4-element array, got $arrLen")
+      (ocert, afterOcert) <- decodeOperationalCertFlat(bytes, afterArr)
+      afterEnd            <- if arrLen == IndefiniteLength then consumeBreak(bytes, afterOcert) else Right(afterOcert)
+    yield (ocert, afterEnd)
+
+  /** Decode protocol version: Babbage+ as 2-element array, TPraos as 2 flat fields. */
+  private def decodeProtocolVersionFlat(bytes: ByteVector, offset: Int): Either[String, ((Int, Int), Int)] =
+    for
+      (major, afterMajor) <- readUInt(bytes, offset)
+      (minor, afterMinor) <- readUInt(bytes, afterMajor)
+    yield ((major.toInt, minor.toInt), afterMinor)
+
+  private def decodeProtocolVersionArray(bytes: ByteVector, offset: Int): Either[String, ((Int, Int), Int)] =
+    for
+      (arrLen, afterArr) <- readArrayHeader(bytes, offset)
+      _ <- require(arrLen == 2 || arrLen == IndefiniteLength, s"ProtVer expected 2-element array, got $arrLen")
+      (pv, afterPv) <- decodeProtocolVersionFlat(bytes, afterArr)
+      afterEnd      <- if arrLen == IndefiniteLength then consumeBreak(bytes, afterPv) else Right(afterPv)
+    yield (pv, afterEnd)
+
   private def decodeShelleyHeader(bytes: ByteVector, offset: Int, era: Era): Either[String, (Int, ShelleyHeader)] =
     for
       // header = [header_body, signature]
       (hdrOuterLen, afterHdrOuter) <- readArrayHeader(bytes, offset)
+      // Record start of header_body for raw CBOR capture (for KES verification)
+      hdrBodyStart = afterHdrOuter
       // header_body structure differs by era:
       //   Shelley/Allegra/Mary/Alonzo (era 2-5): 15 flat fields
       //     [blockNo, slot, prevHash, issuerVkey, vrfVkey,
@@ -354,32 +402,32 @@ object BlockDecoder:
         case Era.Babbage | Era.Conway =>
           // Single vrf_result [output, proof], then bodySize, bodyHash, op_cert (array), prot_ver (array)
           for
-            (_, afterVrf)             <- skipItem(bytes, afterVrfVkey)  // vrf_result
+            (vrfCert, afterVrf)       <- decodeVrfCert(bytes, afterVrfVkey)
             (bodySize, afterBodySize) <- readUInt(bytes, afterVrf)
             (bodyHash, afterBodyHash) <- readHash32(bytes, afterBodySize)
-            (_, afterOpCert)          <- skipItem(bytes, afterBodyHash) // operational_cert [4]
-            (_, afterProtVer)         <- skipItem(bytes, afterOpCert)   // protocol_version [2]
+            (ocert, afterOpCert)      <- decodeOperationalCertArray(bytes, afterBodyHash)
+            (protVer, afterProtVer)   <- decodeProtocolVersionArray(bytes, afterOpCert)
             afterHdrBodyEnd <-
               if hdrBodyLen == IndefiniteLength then consumeBreak(bytes, afterProtVer) else Right(afterProtVer)
-          yield (afterHdrBodyEnd, bodySize, bodyHash)
+          yield (afterHdrBodyEnd, bodySize, bodyHash, VrfResult.Praos(vrfCert), ocert, protVer)
         case _ =>
           // Two VRF certs (nonce_vrf, leader_vrf), then bodySize, bodyHash,
           // then 4 flat operational_cert fields, then 2 flat protocol_version fields
           for
-            (_, afterNonceVrf)        <- skipItem(bytes, afterVrfVkey)  // nonce_vrf [output, proof]
-            (_, afterLeaderVrf)       <- skipItem(bytes, afterNonceVrf) // leader_vrf [output, proof]
-            (bodySize, afterBodySize) <- readUInt(bytes, afterLeaderVrf)
-            (bodyHash, afterBodyHash) <- readHash32(bytes, afterBodySize)
-            // operational_cert: 4 flat fields (hot_vkey, seq_num, kes_period, sigma)
-            afterOpCert <- skipNItems(bytes, afterBodyHash, 4)
-            // protocol_version: 2 flat fields (major, minor)
-            afterProtVer <- skipNItems(bytes, afterOpCert, 2)
+            (nonceVrf, afterNonceVrf)   <- decodeVrfCert(bytes, afterVrfVkey)
+            (leaderVrf, afterLeaderVrf) <- decodeVrfCert(bytes, afterNonceVrf)
+            (bodySize, afterBodySize)   <- readUInt(bytes, afterLeaderVrf)
+            (bodyHash, afterBodyHash)   <- readHash32(bytes, afterBodySize)
+            (ocert, afterOpCert)        <- decodeOperationalCertFlat(bytes, afterBodyHash)
+            (protVer, afterProtVer)     <- decodeProtocolVersionFlat(bytes, afterOpCert)
             afterHdrBodyEnd <-
               if hdrBodyLen == IndefiniteLength then consumeBreak(bytes, afterProtVer) else Right(afterProtVer)
-          yield (afterHdrBodyEnd, bodySize, bodyHash)
-      (afterHdrBodyEnd, bodySize, bodyHash) = result
-      // Skip signature (byte string after header_body)
-      (_, afterSignature) <- skipItem(bytes, afterHdrBodyEnd)
+          yield (afterHdrBodyEnd, bodySize, bodyHash, VrfResult.TPraos(nonceVrf, leaderVrf), ocert, protVer)
+      (afterHdrBodyEnd, bodySize, bodyHash, vrfResult, ocert, protVer) = result
+      // Capture raw header body CBOR (from hdrBodyStart to afterHdrBodyEnd)
+      rawHeaderBody = bytes.slice(hdrBodyStart.toLong, afterHdrBodyEnd.toLong)
+      // KES signature (byte string after header_body)
+      (kesSignature, afterSignature) <- readByteString(bytes, afterHdrBodyEnd)
       // If header was indefinite-length, consume the break byte
       afterHdrEnd <-
         if hdrOuterLen == IndefiniteLength then consumeBreak(bytes, afterSignature) else Right(afterSignature)
@@ -391,8 +439,13 @@ object BlockDecoder:
         prevHash = prevHash,
         issuerVkey = issuerVkey,
         vrfVkey = vrfVkey,
+        vrfResult = vrfResult,
         blockBodySize = bodySize,
-        blockBodyHash = bodyHash
+        blockBodyHash = bodyHash,
+        ocert = ocert,
+        protocolVersion = protVer,
+        kesSignature = kesSignature,
+        rawHeaderBody = rawHeaderBody
       )
     )
 

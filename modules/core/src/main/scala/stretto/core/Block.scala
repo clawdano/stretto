@@ -71,16 +71,40 @@ final case class ByronTxOut(
     amount: Lovelace
 )
 
+/** VRF certificate — proof + output. */
+final case class VrfCert(proof: ByteVector, output: ByteVector)
+
+/** Operational certificate for block production. */
+final case class OperationalCert(
+    hotVkey: ByteVector, // KES verification key (32 bytes)
+    counter: Long,       // monotonic per pool
+    startKesPeriod: Long,
+    coldSignature: ByteVector // Ed25519 sig by cold key (issuerVkey)
+)
+
 /** Shelley+ block header (common fields across all post-Byron eras). */
 final case class ShelleyHeader(
     blockNo: BlockNo,
     slotNo: SlotNo,
     prevHash: Hash32,
-    issuerVkey: ByteVector,
-    vrfVkey: ByteVector,
+    issuerVkey: ByteVector, // Ed25519 pool cold VK (32 bytes)
+    vrfVkey: ByteVector,    // VRF VK (32 bytes)
+    vrfResult: VrfResult,   // VRF cert(s) — era-specific
     blockBodySize: Long,
-    blockBodyHash: Hash32
+    blockBodyHash: Hash32,
+    ocert: OperationalCert,
+    protocolVersion: (Int, Int), // (major, minor)
+    kesSignature: ByteVector,    // KES sig over header body
+    rawHeaderBody: ByteVector    // raw CBOR of header body for KES verification
 )
+
+/** VRF result — era-specific: pre-Babbage has two VRF certs (nonce + leader), Babbage+ has one. */
+enum VrfResult:
+  /** TPraos (Shelley-Alonzo): separate nonce and leader VRF proofs. */
+  case TPraos(nonceVrf: VrfCert, leaderVrf: VrfCert)
+
+  /** Praos (Babbage+): single unified VRF result. */
+  case Praos(vrfCert: VrfCert)
 
 /**
  * Transaction body — common across Shelley+ eras.

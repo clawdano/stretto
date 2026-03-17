@@ -142,13 +142,18 @@ class BlockApplicatorSpec extends FunSuite:
     val spendingBlock = Block.ShelleyBlock(
       era = Era.Shelley,
       header = ShelleyHeader(
-        BlockNo(1L),
-        SlotNo(1L),
-        Hash32.unsafeFrom(ByteVector.fill(32)(0)),
-        ByteVector.empty,
-        ByteVector.empty,
-        0L,
-        Hash32.unsafeFrom(ByteVector.fill(32)(0))
+        blockNo = BlockNo(1L),
+        slotNo = SlotNo(1L),
+        prevHash = Hash32.unsafeFrom(ByteVector.fill(32)(0)),
+        issuerVkey = ByteVector.fill(32)(0),
+        vrfVkey = ByteVector.fill(32)(0),
+        vrfResult = VrfResult.Praos(VrfCert(ByteVector.empty, ByteVector.empty)),
+        blockBodySize = 0L,
+        blockBodyHash = Hash32.unsafeFrom(ByteVector.fill(32)(0)),
+        ocert = OperationalCert(ByteVector.fill(32)(0), 0L, 0L, ByteVector.fill(64)(0)),
+        protocolVersion = (2, 0),
+        kesSignature = ByteVector.empty,
+        rawHeaderBody = ByteVector.empty
       ),
       txBodies = Vector(
         TransactionBody(

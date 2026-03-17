@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.0-SNAPSHOT] - 2026-03-17
+
+### Added
+- **Ouroboros Praos consensus module** — full 4-phase implementation:
+  - **Phase 1: Crypto primitives + block model** — Ed25519 verification (BouncyCastle), VRF verification via libsodium/JNA (lazy-loaded, graceful fallback), extended ShelleyHeader with VRF certs, OCert, KES signature, protocol version, raw header body capture for KES verification
+  - **Phase 2: Header validation** — 7-step validation per Shelley formal spec (pool lookup, KES period bounds, OCert Ed25519 verify, KES signature verify, VRF key hash match, VRF proof verify, leader election threshold); fixed-point Taylor series leader check avoiding floating point
+  - **Phase 3: Epoch state** — epoch nonce evolution (Blake2b-256 accumulation with stability window freeze), three-snapshot stake pipeline (mark/set/go rotation), OCert counter monotonicity, full ConsensusState tracking
+  - **Phase 4: Chain selection** — longest chain rule with OCert counter and VRF output tiebreakers, security window (k=2160) fork filtering, block immutability check
+- **Standalone KES library** (`modules/kes/`, package `cardano.kes`) — CompactSum6KES verification in pure Scala, binary Merkle tree over Ed25519 keys (6 levels, 64 periods), designed for extraction as independent open-source JVM library; deps: BouncyCastle + scodec-bits only
+- **VrfCert, OperationalCert, VrfResult** types — era-specific VRF handling (TPraos: dual nonce+leader certs; Praos: single cert), full OCert fields (hotVkey, counter, startKesPeriod, coldSignature)
+- **BlockDecoder consensus fields** — now parses VRF certs, OCerts, KES signatures, protocol versions from all Shelley+ era headers; captures raw header body CBOR for KES verification
+
+### Changed
+- **ShelleyHeader** extended with 6 new fields: vrfResult, ocert, protocolVersion, kesSignature, rawHeaderBody (was: only blockNo/slotNo/prevHash/issuerVkey/vrfVkey/bodySize/bodyHash)
+- **build.sbt** — added `kes` standalone module, JNA dependency for VRF/libsodium, consensus depends on kes
+
+### Testing
+- 403 tests total (394 passing, 9 ignored integration tests), up from 322
+- Consensus: 51 tests (leader check math, VRF input construction, header validation pipeline, epoch nonce evolution, stake snapshot rotation, OCert monotonicity, chain selection)
+- KES: 13 tests (depth 1 & 2 sign/verify, wrong period/message/VK rejection, size validation)
+- Crypto: 9 tests (Ed25519 sign/verify roundtrip, wrong key/sig/size rejection, Blake2b-256)
+- Serialization: 8 new tests (VRF cert parsing, OCert fields, KES signature, protocol version, raw header body across all Shelley+ eras)
+
 ## [0.1.0-SNAPSHOT] - 2026-03-16
 
 ### Added

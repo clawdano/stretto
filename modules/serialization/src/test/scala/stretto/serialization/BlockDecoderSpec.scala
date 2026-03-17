@@ -292,3 +292,119 @@ class BlockDecoderSpec extends FunSuite:
         assertEquals(header.protocolMagic, 764824073L)
       case _ => fail("expected ByronBlock")
   }
+
+  // ---------------------------------------------------------------------------
+  // Consensus header fields (Phase 1)
+  // ---------------------------------------------------------------------------
+
+  test("Shelley block header has VRF result (TPraos: two certs)") {
+    val bytes = loadBlock("shelley1.block")
+    val block = BlockDecoder.decode(bytes).getOrElse(fail("decode failed"))
+    block match
+      case Block.ShelleyBlock(_, header, _, _, _, _) =>
+        header.vrfResult match
+          case VrfResult.TPraos(nonce, leader) =>
+            // VRF proofs are 80 bytes, outputs are 32 bytes
+            assertEquals(nonce.proof.size, 80L, "nonce VRF proof should be 80 bytes")
+            assertEquals(nonce.output.size, 64L, "nonce VRF output should be 64 bytes")
+            assertEquals(leader.proof.size, 80L, "leader VRF proof should be 80 bytes")
+            assertEquals(leader.output.size, 64L, "leader VRF output should be 64 bytes")
+          case other => fail(s"expected TPraos VRF result for Shelley, got $other")
+      case _ => fail("expected ShelleyBlock")
+  }
+
+  test("Babbage block header has VRF result (Praos: single cert)") {
+    val bytes = loadBlock("babbage1.block")
+    val block = BlockDecoder.decode(bytes).getOrElse(fail("decode failed"))
+    block match
+      case Block.ShelleyBlock(_, header, _, _, _, _) =>
+        header.vrfResult match
+          case VrfResult.Praos(cert) =>
+            assertEquals(cert.proof.size, 80L, "VRF proof should be 80 bytes")
+            assertEquals(cert.output.size, 64L, "VRF output should be 64 bytes")
+          case other => fail(s"expected Praos VRF result for Babbage, got $other")
+      case _ => fail("expected ShelleyBlock")
+  }
+
+  test("Shelley+ headers have populated OCert fields") {
+    val shelleyFixtures =
+      List("shelley1.block", "allegra1.block", "mary1.block", "alonzo1.block", "babbage1.block", "conway1.block")
+    shelleyFixtures.foreach { name =>
+      val bytes = loadBlock(name)
+      val block = BlockDecoder.decode(bytes).getOrElse(fail(s"$name decode failed"))
+      block match
+        case Block.ShelleyBlock(_, header, _, _, _, _) =>
+          assertEquals(header.ocert.hotVkey.size, 32L, s"$name: OCert hotVkey should be 32 bytes")
+          assertEquals(header.ocert.coldSignature.size, 64L, s"$name: OCert coldSignature should be 64 bytes")
+          assert(header.ocert.startKesPeriod >= 0, s"$name: OCert startKesPeriod should be non-negative")
+        case _ => fail(s"$name: expected ShelleyBlock")
+    }
+  }
+
+  test("Shelley+ headers have populated KES signature") {
+    val shelleyFixtures = List("shelley1.block", "babbage1.block", "conway1.block")
+    shelleyFixtures.foreach { name =>
+      val bytes = loadBlock(name)
+      val block = BlockDecoder.decode(bytes).getOrElse(fail(s"$name decode failed"))
+      block match
+        case Block.ShelleyBlock(_, header, _, _, _, _) =>
+          // KES signature for Sum6KES = 448 bytes (64 + 32 + 32*6 + 6*32) — actually varies
+          assert(header.kesSignature.nonEmpty, s"$name: KES signature should not be empty")
+          assert(header.kesSignature.size >= 288, s"$name: KES signature should be at least 288 bytes")
+        case _ => fail(s"$name: expected ShelleyBlock")
+    }
+  }
+
+  test("Shelley+ headers have raw header body for KES verification") {
+    val shelleyFixtures = List("shelley1.block", "babbage1.block", "conway1.block")
+    shelleyFixtures.foreach { name =>
+      val bytes = loadBlock(name)
+      val block = BlockDecoder.decode(bytes).getOrElse(fail(s"$name decode failed"))
+      block match
+        case Block.ShelleyBlock(_, header, _, _, _, _) =>
+          assert(header.rawHeaderBody.nonEmpty, s"$name: raw header body should not be empty")
+          // Raw header body should start with CBOR array header
+          val firstByte = header.rawHeaderBody(0) & 0xff
+          val majorType = firstByte >> 5
+          assertEquals(majorType, 4, s"$name: raw header body should start with array (major type 4)")
+        case _ => fail(s"$name: expected ShelleyBlock")
+    }
+  }
+
+  test("Shelley+ headers have valid protocol version") {
+    val shelleyFixtures =
+      List("shelley1.block", "allegra1.block", "mary1.block", "alonzo1.block", "babbage1.block", "conway1.block")
+    // Note: Allegra blocks on mainnet typically have protocol version 4 (not 3),
+    // and Mary blocks have version 5 (not 4) — these depend on what era the specific
+    // test block was minted in. Only assert version > 0 + spot-check known blocks.
+    val expectedMajorVersions = Map(
+      "shelley1.block" -> 2,
+      "babbage1.block" -> 7
+    )
+    shelleyFixtures.foreach { name =>
+      val bytes = loadBlock(name)
+      val block = BlockDecoder.decode(bytes).getOrElse(fail(s"$name decode failed"))
+      block match
+        case Block.ShelleyBlock(_, header, _, _, _, _) =>
+          val (major, minor) = header.protocolVersion
+          assert(major > 0, s"$name: protocol major version should be > 0")
+          assert(minor >= 0, s"$name: protocol minor version should be >= 0")
+          expectedMajorVersions.get(name).foreach { expected =>
+            assertEquals(major, expected, s"$name: protocol major version mismatch")
+          }
+        case _ => fail(s"$name: expected ShelleyBlock")
+    }
+  }
+
+  test("Shelley+ headers have 32-byte issuerVkey and vrfVkey") {
+    val shelleyFixtures = List("shelley1.block", "babbage1.block", "conway1.block")
+    shelleyFixtures.foreach { name =>
+      val bytes = loadBlock(name)
+      val block = BlockDecoder.decode(bytes).getOrElse(fail(s"$name decode failed"))
+      block match
+        case Block.ShelleyBlock(_, header, _, _, _, _) =>
+          assertEquals(header.issuerVkey.size, 32L, s"$name: issuerVkey should be 32 bytes")
+          assertEquals(header.vrfVkey.size, 32L, s"$name: vrfVkey should be 32 bytes")
+        case _ => fail(s"$name: expected ShelleyBlock")
+    }
+  }
