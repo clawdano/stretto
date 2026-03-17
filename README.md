@@ -143,6 +143,59 @@ When using `--network`, default relay peers are provided:
 
 You can override the peer with `--peer` or use `--magic` for custom networks.
 
+## Docker
+
+### Build the Image
+
+```bash
+sbt cli/docker:publishLocal
+```
+
+This produces `clawdanoai/stretto:0.1.0-SNAPSHOT` (~226 MB) based on `eclipse-temurin:21-jre-jammy`.
+
+### Run a Relay Node
+
+```bash
+# Preprod relay on localhost:3001
+docker run -d --name stretto-relay \
+  -p 3001:3001 \
+  -v stretto-data:/data \
+  clawdanoai/stretto:0.1.0-SNAPSHOT \
+  relay --network preprod --peer preprod-node.play.dev.cardano.org:3001 --listen 0.0.0.0:3001 --db /data
+
+# Mainnet relay
+docker run -d --name stretto-mainnet \
+  -p 3001:3001 \
+  -v stretto-mainnet-data:/data \
+  clawdanoai/stretto:0.1.0-SNAPSHOT \
+  relay --network mainnet --peer backbone.cardano.iog.io:3001 --listen 0.0.0.0:3001 --db /data
+```
+
+### Run Block Sync
+
+```bash
+docker run -d --name stretto-sync \
+  -v stretto-data:/data \
+  clawdanoai/stretto:0.1.0-SNAPSHOT \
+  sync-blocks --network preprod --peer preprod-node.play.dev.cardano.org:3001 --db /data
+```
+
+### Configuration
+
+| Environment Variable | Description | Default |
+|---------------------|-------------|---------|
+| `JAVA_OPTS` | JVM options | `-Xmx512m` |
+
+The `/data` volume is used for RocksDB storage. All CLI options are passed as container arguments after the image name.
+
+### Publish to Docker Hub
+
+```bash
+sbt cli/docker:publish
+```
+
+Pushes to `clawdanoai/stretto` on Docker Hub.
+
 ## Architecture
 
 ```
