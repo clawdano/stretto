@@ -17,7 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **BlockDecoder consensus fields** — now parses VRF certs, OCerts, KES signatures, protocol versions from all Shelley+ era headers; captures raw header body CBOR for KES verification
 
 ### Fixed
-- **ChainSync tip-following stall** — pipelined sync would stall for ~33min after reaching tip because `drainAndContinue` blocked on 99 remaining in-flight responses (each requiring a new block at ~20s). Rewrote drain to consume old responses one at a time with proper `MsgAwaitReply` handling, then seamlessly transition to single-request mode.
+- **ChainSync tip-following stall** — pipelined sync would stall for ~33min after reaching tip because 99 remaining in-flight requests each required a new block (~20s). Root cause: fixed 100-request window with no tip-proximity awareness. Fix: adaptive pipelining that compares each response's slot with the peer's tip slot; when within 600 slots (~10min), stops sending replacement requests, naturally draining the window to 0 before hitting MsgAwaitReply. Also fixed drain error handling (old `case _ => None` could corrupt protocol state). On reconnect near tip, the window now shrinks immediately instead of firing 100 requests into a 0-block gap.
 
 ### Changed
 - **ShelleyHeader** extended with 6 new fields: vrfResult, ocert, protocolVersion, kesSignature, rawHeaderBody (was: only blockNo/slotNo/prevHash/issuerVkey/vrfVkey/bodySize/bodyHash)

@@ -13,6 +13,11 @@ import stretto.core.{Point, Tip}
  * and refills as responses arrive, maintaining a sliding window of
  * in-flight requests for maximum throughput.
  *
+ * When approaching the peer's tip, the pipeline automatically reduces
+ * the window to avoid a long drain of in-flight requests at tip speed
+ * (~20s per block). This is detected by comparing the response's slot
+ * with the peer's tip slot.
+ *
  * Usage:
  *   1. Call `findIntersect` with known points to locate a common ancestor.
  *   2. Use `pipelinedHeaderStream` for high-throughput syncing, or
@@ -81,38 +86,52 @@ final class ChainSyncClient(mux: MuxDemuxer):
       }
 
   /**
-   * Pipelined header stream — high-throughput chain sync.
+   * Pipelined header stream — high-throughput chain sync with adaptive window.
    *
    * Sends `windowSize` MsgRequestNext messages upfront, then for each
    * response received, sends another request to maintain the pipeline.
-   * This eliminates the round-trip latency bottleneck.
+   * This eliminates the round-trip latency bottleneck during bulk sync.
    *
-   * When we reach the tip (MsgAwaitReply), the pipeline drains and we
-   * fall back to single-request mode.
+   * When the response's slot approaches the peer's tip slot (within
+   * `nearTipSlotThreshold` slots), the pipeline stops sending replacement
+   * requests, naturally draining the window to 0 before reaching tip.
+   * This avoids the ~33min drain that occurred with a fixed 100-request window.
+   *
+   * Once drained, falls back to single-request mode for tip-following.
    */
   def pipelinedHeaderStream(
       knownPoints: List[Point],
-      windowSize: Int = 100
+      windowSize: Int = 100,
+      nearTipSlotThreshold: Long = 600 // ~10 min of slots: stop refilling when within this distance
   ): Stream[IO, ChainSyncResponse] =
     Stream.eval(findIntersect(knownPoints)) >>
       Stream.eval(sendBurst(windowSize)).flatMap { inFlight =>
-        pipelineLoop(inFlight, windowSize)
+        pipelineLoop(inFlight, nearTipSlotThreshold)
       }
 
   /** Send N MsgRequestNext messages in a burst. */
   private def sendBurst(n: Int): IO[Int] =
     (1 to n).toList.traverse_(_ => send(ChainSyncMessage.MsgRequestNext)).as(n)
 
+  /** Extract slot number from a raw era-wrapped header for tip-proximity check. */
+  private def extractSlotFromHeader(header: ByteVector): Option[Long] =
+    HeaderParser.parse(header).toOption.map(_.slotNo.value)
+
   /**
-   * Core pipeline loop: receive a response, send a new request to keep
-   * the window full, emit the response downstream.
+   * Core pipeline loop: receive a response, optionally send a new request
+   * to keep the window full, emit the response downstream.
+   *
+   * Automatically reduces the window when approaching the peer's tip,
+   * preventing a long drain of in-flight requests.
    */
-  private def pipelineLoop(inFlight: Int, windowSize: Int): Stream[IO, ChainSyncResponse] =
-    if inFlight <= 0 then Stream.empty
+  private def pipelineLoop(inFlight: Int, nearTipSlotThreshold: Long): Stream[IO, ChainSyncResponse] =
+    if inFlight <= 0 then
+      // Window fully drained — switch to single-request mode for tip-following
+      Stream.repeatEval(requestNext)
     else
       Stream.eval(recv).flatMap {
         case ChainSyncMessage.MsgAwaitReply =>
-          // At the tip — drain remaining in-flight, then switch to single-request
+          // At the tip — receive the awaited response, then drain remaining without sending
           Stream.eval(recv).flatMap {
             case ChainSyncMessage.MsgRollForward(header, tip) =>
               Stream.emit(ChainSyncResponse.RollForward(header, tip)) ++
@@ -126,14 +145,27 @@ final class ChainSyncClient(mux: MuxDemuxer):
               )
           }
         case ChainSyncMessage.MsgRollForward(header, tip) =>
-          // Got a response — send another request to refill the window
-          Stream.eval(send(ChainSyncMessage.MsgRequestNext)) >>
+          // Check if we're close to the peer's tip
+          val tipSlot = tip.point match
+            case bp: Point.BlockPoint => bp.slotNo.value
+            case _                    => Long.MaxValue
+          val headerSlot = extractSlotFromHeader(header).getOrElse(0L)
+          val nearTip    = (tipSlot - headerSlot) < nearTipSlotThreshold
+
+          if nearTip then
+            // Close to tip: don't send replacement request, let window shrink
             Stream.emit(ChainSyncResponse.RollForward(header, tip)) ++
-            pipelineLoop(inFlight, windowSize)
+              pipelineLoop(inFlight - 1, nearTipSlotThreshold)
+          else
+            // Far from tip: send replacement to maintain pipeline throughput
+            Stream.eval(send(ChainSyncMessage.MsgRequestNext)) >>
+              Stream.emit(ChainSyncResponse.RollForward(header, tip)) ++
+              pipelineLoop(inFlight, nearTipSlotThreshold)
+
         case ChainSyncMessage.MsgRollBackward(point, tip) =>
-          Stream.eval(send(ChainSyncMessage.MsgRequestNext)) >>
-            Stream.emit(ChainSyncResponse.RollBackward(point, tip)) ++
-            pipelineLoop(inFlight, windowSize)
+          // On rollback, don't refill (conservative)
+          Stream.emit(ChainSyncResponse.RollBackward(point, tip)) ++
+            pipelineLoop(inFlight - 1, nearTipSlotThreshold)
         case other =>
           Stream.raiseError[IO](
             new RuntimeException(s"Unexpected response in pipeline: $other")
@@ -164,19 +196,12 @@ final class ChainSyncClient(mux: MuxDemuxer):
     }
 
   /**
-   * Transition from pipelined to single-request mode at tip.
-   *
-   * Consumes `remaining` old in-flight responses (recv-only, no new sends),
-   * then switches to requestNext (send+recv) for tip-following.
-   *
-   * Each old response may take ~20s at tip (server waits for new block),
-   * so we consume them one at a time and emit each immediately rather than
-   * trying to drain all at once before switching modes.
+   * Drain remaining in-flight responses (recv-only, no new sends),
+   * then continue with single-request mode for tip-following.
    */
   private def drainAndContinue(remaining: Int): Stream[IO, ChainSyncResponse] =
     if remaining <= 0 then Stream.repeatEval(requestNext)
     else
-      // Consume one old in-flight response (no new request sent)
       Stream.eval(recvResponse).flatMap { response =>
         Stream.emit(response) ++ drainAndContinue(remaining - 1)
       }
