@@ -3,6 +3,7 @@ package stretto.network
 import cats.effect.IO
 import cats.syntax.all.*
 import fs2.Stream
+import org.typelevel.log4cats.slf4j.Slf4jLogger
 import scodec.bits.ByteVector
 import stretto.core.{Point, Tip}
 
@@ -25,6 +26,7 @@ import stretto.core.{Point, Tip}
  */
 final class ChainSyncClient(mux: MuxDemuxer):
 
+  private val logger  = Slf4jLogger.getLoggerFromName[IO]("stretto.network.ChainSync")
   private val protoId = MiniProtocolId.ChainSyncN2N.id
 
   /** Send a ChainSync message to the peer. */
@@ -116,11 +118,18 @@ final class ChainSyncClient(mux: MuxDemuxer):
         case bp: Point.BlockPoint => bp.slotNo.value
         case _                    => Long.MaxValue
       // If we're already near tip, use minimal window to avoid massive drain
-      val effectiveWindow = if (tipSlot - intersectSlot) < nearTipSlotThreshold then 1 else windowSize
+      val slotGap         = tipSlot - intersectSlot
+      val effectiveWindow = if slotGap < nearTipSlotThreshold then 1 else windowSize
 
-      Stream.eval(sendBurst(effectiveWindow)).flatMap { inFlight =>
-        pipelineLoop(inFlight, nearTipSlotThreshold)
-      }
+      Stream
+        .eval(
+          logger.info(
+            s"ChainSync intersect: slot $intersectSlot, tip slot $tipSlot, gap $slotGap, window $effectiveWindow"
+          ) *> sendBurst(effectiveWindow)
+        )
+        .flatMap { inFlight =>
+          pipelineLoop(inFlight, nearTipSlotThreshold)
+        }
     }
 
   /** Send N MsgRequestNext messages in a burst. */
@@ -141,23 +150,25 @@ final class ChainSyncClient(mux: MuxDemuxer):
   private def pipelineLoop(inFlight: Int, nearTipSlotThreshold: Long): Stream[IO, ChainSyncResponse] =
     if inFlight <= 0 then
       // Window fully drained — switch to single-request mode for tip-following
-      Stream.repeatEval(requestNext)
+      Stream.eval(logger.debug("ChainSync: pipeline drained, switching to requestNext mode")) >>
+        Stream.repeatEval(requestNext)
     else
       Stream.eval(recv).flatMap {
         case ChainSyncMessage.MsgAwaitReply =>
           // At the tip — receive the awaited response, then drain remaining without sending
-          Stream.eval(recv).flatMap {
-            case ChainSyncMessage.MsgRollForward(header, tip) =>
-              Stream.emit(ChainSyncResponse.RollForward(header, tip)) ++
-                drainAndContinue(inFlight - 1)
-            case ChainSyncMessage.MsgRollBackward(point, tip) =>
-              Stream.emit(ChainSyncResponse.RollBackward(point, tip)) ++
-                drainAndContinue(inFlight - 1)
-            case other =>
-              Stream.raiseError[IO](
-                new RuntimeException(s"Unexpected message after MsgAwaitReply: $other")
-              )
-          }
+          Stream.eval(logger.debug(s"ChainSync: MsgAwaitReply, inFlight=$inFlight, waiting for block...")) >>
+            Stream.eval(recv).flatMap {
+              case ChainSyncMessage.MsgRollForward(header, tip) =>
+                Stream.emit(ChainSyncResponse.RollForward(header, tip)) ++
+                  drainAndContinue(inFlight - 1)
+              case ChainSyncMessage.MsgRollBackward(point, tip) =>
+                Stream.emit(ChainSyncResponse.RollBackward(point, tip)) ++
+                  drainAndContinue(inFlight - 1)
+              case other =>
+                Stream.raiseError[IO](
+                  new RuntimeException(s"Unexpected message after MsgAwaitReply: $other")
+                )
+            }
         case ChainSyncMessage.MsgRollForward(header, tip) =>
           // Check if we're close to the peer's tip
           val tipSlot = tip.point match

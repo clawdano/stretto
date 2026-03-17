@@ -332,8 +332,16 @@ object BlockSyncPipeline:
           .getOrElse(progress.peerTipSlot),
         peerTipBlock = effectiveTip.map(_.blockNo).getOrElse(progress.peerTipBlock)
       )
+      // Near tip: log every block. Bulk sync: log every progressInterval blocks.
+      nearTip = entries.size <= 2 && newProgress.peerTipSlot.value - newProgress.currentSlot.value < 600
       _ <-
-        if newProgress.blocksStored / progressInterval > progress.blocksStored / progressInterval then
+        if nearTip then
+          logger.info(
+            s"Tip: slot ${newProgress.currentSlot.value} | " +
+              s"peer tip: slot ${newProgress.peerTipSlot.value} block ${newProgress.peerTipBlock.blockNoValue} | " +
+              s"stored: ${newProgress.blocksStored}"
+          )
+        else if newProgress.blocksStored / progressInterval > progress.blocksStored / progressInterval then
           onProgress(newProgress)
         else IO.unit
     yield newProgress
