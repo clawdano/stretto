@@ -6,6 +6,7 @@
   </appender>
 
   <logger name="stretto" level="INFO" />
+  <logger name="stretto.network.KeepAlive" level="DEBUG" />
   <logger name="org.rocksdb" level="WARN" />
 
   <root level="WARN">
