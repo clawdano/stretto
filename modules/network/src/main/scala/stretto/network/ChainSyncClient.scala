@@ -104,10 +104,24 @@ final class ChainSyncClient(mux: MuxDemuxer):
       windowSize: Int = 100,
       nearTipSlotThreshold: Long = 600 // ~10 min of slots: stop refilling when within this distance
   ): Stream[IO, ChainSyncResponse] =
-    Stream.eval(findIntersect(knownPoints)) >>
-      Stream.eval(sendBurst(windowSize)).flatMap { inFlight =>
+    Stream.eval(findIntersect(knownPoints)).flatMap { intersectResult =>
+      // Determine if we're already near tip from the intersection result
+      val peerTip = intersectResult match
+        case Right((_, tip)) => tip
+        case Left(tip)       => tip
+      val intersectSlot = intersectResult match
+        case Right((Point.BlockPoint(slot, _), _)) => slot.value
+        case _                                     => 0L
+      val tipSlot = peerTip.point match
+        case bp: Point.BlockPoint => bp.slotNo.value
+        case _                    => Long.MaxValue
+      // If we're already near tip, use minimal window to avoid massive drain
+      val effectiveWindow = if (tipSlot - intersectSlot) < nearTipSlotThreshold then 1 else windowSize
+
+      Stream.eval(sendBurst(effectiveWindow)).flatMap { inFlight =>
         pipelineLoop(inFlight, nearTipSlotThreshold)
       }
+    }
 
   /** Send N MsgRequestNext messages in a burst. */
   private def sendBurst(n: Int): IO[Int] =
