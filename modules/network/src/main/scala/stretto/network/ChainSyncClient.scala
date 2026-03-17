@@ -141,35 +141,45 @@ final class ChainSyncClient(mux: MuxDemuxer):
       }
 
   /**
-   * Drain remaining in-flight responses (no new requests sent),
-   * then continue with single-request mode.
+   * Receive one response from the peer without sending a new request.
+   * Handles MsgAwaitReply (server at tip, waiting for new block).
+   */
+  private def recvResponse: IO[ChainSyncResponse] =
+    recv.flatMap {
+      case ChainSyncMessage.MsgAwaitReply =>
+        recv.flatMap {
+          case ChainSyncMessage.MsgRollForward(header, tip) =>
+            IO.pure(ChainSyncResponse.RollForward(header, tip))
+          case ChainSyncMessage.MsgRollBackward(point, tip) =>
+            IO.pure(ChainSyncResponse.RollBackward(point, tip))
+          case other =>
+            IO.raiseError(new RuntimeException(s"Unexpected message after MsgAwaitReply: $other"))
+        }
+      case ChainSyncMessage.MsgRollForward(header, tip) =>
+        IO.pure(ChainSyncResponse.RollForward(header, tip))
+      case ChainSyncMessage.MsgRollBackward(point, tip) =>
+        IO.pure(ChainSyncResponse.RollBackward(point, tip))
+      case other =>
+        IO.raiseError(new RuntimeException(s"Unexpected message during drain: $other"))
+    }
+
+  /**
+   * Transition from pipelined to single-request mode at tip.
+   *
+   * Consumes `remaining` old in-flight responses (recv-only, no new sends),
+   * then switches to requestNext (send+recv) for tip-following.
+   *
+   * Each old response may take ~20s at tip (server waits for new block),
+   * so we consume them one at a time and emit each immediately rather than
+   * trying to drain all at once before switching modes.
    */
   private def drainAndContinue(remaining: Int): Stream[IO, ChainSyncResponse] =
-    val drain =
-      if remaining <= 0 then Stream.empty
-      else
-        Stream.unfoldEval(remaining) { n =>
-          if n <= 0 then IO.pure(None)
-          else
-            recv.flatMap {
-              case ChainSyncMessage.MsgRollForward(header, tip) =>
-                IO.pure(Some((ChainSyncResponse.RollForward(header, tip), n - 1)))
-              case ChainSyncMessage.MsgRollBackward(point, tip) =>
-                IO.pure(Some((ChainSyncResponse.RollBackward(point, tip), n - 1)))
-              case ChainSyncMessage.MsgAwaitReply =>
-                // Shouldn't happen during drain, but handle gracefully
-                recv.map {
-                  case ChainSyncMessage.MsgRollForward(header, tip) =>
-                    Some((ChainSyncResponse.RollForward(header, tip), n - 1))
-                  case ChainSyncMessage.MsgRollBackward(point, tip) =>
-                    Some((ChainSyncResponse.RollBackward(point, tip), n - 1))
-                  case _ => None
-                }
-              case _ => IO.pure(None)
-            }
-        }
-    // After draining, switch to single-request mode (at tip, waiting for new blocks)
-    drain ++ Stream.repeatEval(requestNext)
+    if remaining <= 0 then Stream.repeatEval(requestNext)
+    else
+      // Consume one old in-flight response (no new request sent)
+      Stream.eval(recvResponse).flatMap { response =>
+        Stream.emit(response) ++ drainAndContinue(remaining - 1)
+      }
 
   /** Simple non-pipelined header stream (backward compat). */
   def headerStream(knownPoints: List[Point]): Stream[IO, ChainSyncResponse] =

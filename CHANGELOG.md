@@ -16,6 +16,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **VrfCert, OperationalCert, VrfResult** types — era-specific VRF handling (TPraos: dual nonce+leader certs; Praos: single cert), full OCert fields (hotVkey, counter, startKesPeriod, coldSignature)
 - **BlockDecoder consensus fields** — now parses VRF certs, OCerts, KES signatures, protocol versions from all Shelley+ era headers; captures raw header body CBOR for KES verification
 
+### Fixed
+- **ChainSync tip-following stall** — pipelined sync would stall for ~33min after reaching tip because `drainAndContinue` blocked on 99 remaining in-flight responses (each requiring a new block at ~20s). Rewrote drain to consume old responses one at a time with proper `MsgAwaitReply` handling, then seamlessly transition to single-request mode.
+
 ### Changed
 - **ShelleyHeader** extended with 6 new fields: vrfResult, ocert, protocolVersion, kesSignature, rawHeaderBody (was: only blockNo/slotNo/prevHash/issuerVkey/vrfVkey/bodySize/bodyHash)
 - **build.sbt** — added `kes` standalone module, JNA dependency for VRF/libsodium, consensus depends on kes
