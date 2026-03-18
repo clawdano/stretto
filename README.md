@@ -4,7 +4,7 @@
 
 > *In music, a **stretto** is where multiple voices converge, overlapping and reinforcing each other toward resolution — much like nodes reaching consensus.*
 
-**Status:** Full preprod sync operational — headers, blocks, UTxO tracking, N2C relay
+**Status:** Full chain sync on mainnet, preprod, and preview. N2N + N2C relay with tip-following. Ouroboros Praos consensus module. Prometheus metrics.
 
 ## Vision
 
@@ -31,7 +31,7 @@ sbt compile
 ### Run Tests
 
 ```bash
-sbt test
+sbt test    # 403 tests
 ```
 
 ## CLI Usage
@@ -44,51 +44,54 @@ sbt 'cli/run <command> [options]'
 
 ### Commands
 
-#### `relay` — Lightweight N2C Relay Node
+#### `relay` — Relay Node
 
-Syncs blocks from an upstream N2N peer and serves them to local N2C clients via ChainSync. Designed to replace heavy Haskell nodes (8-16 GB RAM) for chain-following workloads, targeting 256-512 MB RAM.
+Syncs blocks from an upstream N2N peer and serves them to downstream N2N peers and local N2C clients.
 
 ```bash
-# Sync from preprod and serve N2C on localhost:3001
-sbt 'cli/run relay --network preprod --peer panic-station:30010 --listen 127.0.0.1:3001'
+# Preprod relay with N2N on default port 3001
+sbt 'cli/run relay --network preprod --peer preprod-node.play.dev.cardano.org:3001'
 
-# With custom database path and max clients
-sbt 'cli/run relay --network preprod --peer panic-station:30010 --listen 127.0.0.1:3001 --db ./my-relay-data --max-clients 64'
+# With N2C enabled and Prometheus metrics
+sbt 'cli/run relay --network preprod --peer upstream:3001 --n2c-port 3002 --metrics-port 9090'
 
-# Mainnet relay exposed on all interfaces (use with caution)
-sbt 'cli/run relay --network mainnet --peer relay:3001 --listen 0.0.0.0:3001'
+# Mainnet relay
+sbt 'cli/run relay --network mainnet --peer backbone.cardano.iog.io:3001'
+
+# Stretto-to-stretto chain (downstream syncs from upstream stretto)
+sbt 'cli/run relay --network preprod --peer first-stretto:3001'
 ```
 
 | Option | Description | Default |
 |--------|-------------|---------|
 | `-n, --network <name>` | Network: `mainnet`, `preprod`, `preview` | — |
 | `-p, --peer <host:port>` | Upstream N2N peer address | Network default |
-| `-l, --listen <host:port>` | N2C listen address | `127.0.0.1:3001` |
+| `--host <addr>` | Bind address for all listeners | `0.0.0.0` |
+| `--n2n-port <port>` | N2N listen port (0 = disabled) | `3001` |
+| `--n2c-port <port>` | N2C listen port (0 = disabled) | disabled |
+| `--metrics-port <port>` | Prometheus metrics port (0 = disabled) | disabled |
 | `-d, --db <path>` | Database directory | `./data/<network>-relay` |
-| `--max-clients <n>` | Max concurrent N2C clients | `32` |
+| `--max-n2n-peers <n>` | Max concurrent N2N peers | `16` |
+| `--max-n2c-clients <n>` | Max concurrent N2C clients | `32` |
+| `--keep-alive-interval <s>` | KeepAlive ping interval in seconds | `10` |
 | `--magic <number>` | Custom network magic | From `--network` |
 
 The relay node:
 - Connects upstream via N2N (ChainSync + BlockFetch + KeepAlive)
-- Stores blocks in RocksDB
-- Publishes tip updates via fs2 Topic
-- Accepts N2C connections and serves ChainSync (protocol ID 5)
+- Stores headers and blocks in RocksDB
+- Serves downstream N2N peers (ChainSync + BlockFetch + KeepAlive)
+- Optionally serves N2C clients (ChainSync + LocalStateQuery)
+- Publishes tip updates via fs2 Topic for real-time tip-following
+- Adaptive pipelining: 100-request window for bulk sync, shrinks to 1 near tip
 - Auto-reconnects to upstream on connection loss
-- Binds to `127.0.0.1` by default for security
 
 #### `sync-blocks` — Full Block Sync
 
 Downloads full blocks (headers + bodies) from a Cardano node and stores them in RocksDB.
 
 ```bash
-# Sync all blocks from preprod
-sbt 'cli/run sync-blocks --network preprod --peer panic-station:30010'
-
-# Sync first 1000 blocks
-sbt 'cli/run sync-blocks --network preprod --peer panic-station:30010 --max-blocks 1000'
-
-# Mainnet with custom database path
-sbt 'cli/run sync-blocks --network mainnet --peer relay:3001 --db ./mainnet-data'
+sbt 'cli/run sync-blocks --network preprod --peer preprod-node.play.dev.cardano.org:3001'
+sbt 'cli/run sync-blocks --network mainnet --max-blocks 1000'
 ```
 
 | Option | Description | Default |
@@ -101,47 +104,17 @@ sbt 'cli/run sync-blocks --network mainnet --peer relay:3001 --db ./mainnet-data
 
 #### `sync-headers` — Header-Only Sync
 
-Streams block headers only (no block bodies). Useful for testing or lightweight chain following.
-
 ```bash
-# Sync all headers from preprod
 sbt 'cli/run sync-headers --network preprod'
-
-# Sync first 5000 headers from mainnet
-sbt 'cli/run sync-headers --network mainnet --peer relay:3001 --max-headers 5000'
-```
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `-n, --network <name>` | Network: `mainnet`, `preprod`, `preview` | — |
-| `-p, --peer <host:port>` | Peer address | Network default |
-| `-d, --db <path>` | Database directory | `./data/<network>` |
-| `-m, --max-headers <n>` | Max headers to sync (0 = unlimited) | `0` |
-| `--magic <number>` | Custom network magic | From `--network` |
-
-#### `version`
-
-```bash
-sbt 'cli/run version'
-```
-
-#### `help`
-
-```bash
-sbt 'cli/run help'
 ```
 
 ### Network Presets
-
-When using `--network`, default relay peers are provided:
 
 | Network | Magic | Default Peers |
 |---------|-------|---------------|
 | `mainnet` | 764824073 | `backbone.cardano.iog.io:3001` |
 | `preprod` | 1 | `preprod-node.play.dev.cardano.org:3001` |
 | `preview` | 2 | `preview-node.play.dev.cardano.org:3001` |
-
-You can override the peer with `--peer` or use `--magic` for custom networks.
 
 ## Docker
 
@@ -151,33 +124,43 @@ You can override the peer with `--peer` or use `--magic` for custom networks.
 sbt cli/docker:publishLocal
 ```
 
-This produces `clawdanoai/stretto:0.1.0-SNAPSHOT` (~226 MB) based on `eclipse-temurin:21-jre-jammy`.
+Produces `clawdanoai/stretto:0.1.0-SNAPSHOT` based on `eclipse-temurin:21-jre-jammy`.
 
 ### Run a Relay Node
 
 ```bash
-# Preprod relay on localhost:3001
-docker run -d --name stretto-relay \
+# Preprod relay with N2N on port 3001 and metrics on 9090
+docker run -d --name stretto-preprod \
   -p 3001:3001 \
-  -v stretto-data:/data \
+  -p 9090:9090 \
+  -v stretto-preprod-data:/data \
   clawdanoai/stretto:0.1.0-SNAPSHOT \
-  relay --network preprod --peer preprod-node.play.dev.cardano.org:3001 --listen 0.0.0.0:3001 --db /data
+  relay --network preprod \
+    --peer preprod-node.play.dev.cardano.org:3001 \
+    --metrics-port 9090 \
+    --db /data/db
 
-# Mainnet relay
+# Mainnet relay with N2N + N2C + metrics
 docker run -d --name stretto-mainnet \
   -p 3001:3001 \
+  -p 3002:3002 \
+  -p 9090:9090 \
   -v stretto-mainnet-data:/data \
   clawdanoai/stretto:0.1.0-SNAPSHOT \
-  relay --network mainnet --peer backbone.cardano.iog.io:3001 --listen 0.0.0.0:3001 --db /data
-```
+  relay --network mainnet \
+    --peer backbone.cardano.iog.io:3001 \
+    --n2c-port 3002 \
+    --metrics-port 9090 \
+    --db /data/db
 
-### Run Block Sync
-
-```bash
-docker run -d --name stretto-sync \
-  -v stretto-data:/data \
+# Stretto-to-stretto: second node syncs from first
+docker run -d --name stretto-downstream \
+  -p 3003:3001 \
+  -v stretto-downstream-data:/data \
   clawdanoai/stretto:0.1.0-SNAPSHOT \
-  sync-blocks --network preprod --peer preprod-node.play.dev.cardano.org:3001 --db /data
+  relay --network preprod \
+    --peer stretto-preprod:3001 \
+    --db /data/db
 ```
 
 ### Configuration
@@ -186,7 +169,7 @@ docker run -d --name stretto-sync \
 |---------------------|-------------|---------|
 | `JAVA_OPTS` | JVM options | `-Xmx512m` |
 
-The `/data` volume is used for RocksDB storage. All CLI options are passed as container arguments after the image name.
+Exposed ports: `3001` (N2N), `9090` (metrics). The `/data` volume is used for RocksDB storage.
 
 ### Publish to Docker Hub
 
@@ -196,19 +179,41 @@ sbt cli/docker:publish
 
 Pushes to `clawdanoai/stretto` on Docker Hub.
 
+## Prometheus Metrics
+
+Enable with `--metrics-port 9090`, then point Prometheus at `http://stretto:9090/metrics`.
+
+**Cardano chain metrics:**
+| Metric | Description |
+|--------|-------------|
+| `stretto_chain_tip_slot` | Current chain tip slot |
+| `stretto_chain_tip_block` | Current chain tip block number |
+| `stretto_peer_tip_slot` | Upstream peer tip slot |
+| `stretto_chain_density` | Blocks/slots ratio (~0.05 on mainnet) |
+| `stretto_sync_progress` | Sync completion (0.0 to 1.0) |
+| `stretto_epoch` | Current epoch number |
+| `stretto_sync_blocks_total` | Total blocks synced |
+| `stretto_n2n_peers_connected` | Connected N2N downstream peers |
+| `stretto_n2c_clients_connected` | Connected N2C clients |
+| `stretto_keepalive_rtt_ms` | Upstream peer RTT |
+
+**JVM metrics:** `jvm_uptime_seconds`, `jvm_memory_heap_used_bytes`, `jvm_threads_current`, `jvm_gc_collection_seconds_total`, `jvm_system_load_average`, and more.
+
+All metrics include `network="<name>"` labels for multi-network Grafana dashboards.
+
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│                  Stretto (Node)                  │
-├──────────┬──────────┬──────────┬────────────────┤
-│ Network  │Consensus │  Ledger  │    Mempool     │
-│ (N2N/N2C)│ (Praos)  │ (Rules)  │               │
-├──────────┴──────────┴──────────┴────────────────┤
-│              Storage (ChainDB)                   │
-├──────────────────────────────────────────────────┤
-│        Core (Types) + Serialization (CBOR)       │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                    Stretto (Node)                     │
+├──────────┬──────────┬──────────┬────────────────────┤
+│ Network  │Consensus │  Ledger  │    Mempool          │
+│(N2N/N2C) │ (Praos)  │ (Rules)  │                     │
+├──────────┴──────────┴──────────┴────────────────────┤
+│               Storage (RocksDB)                       │
+├──────────────────────────────────────────────────────┤
+│      Core (Types) + Serialization (CBOR) + KES       │
+└──────────────────────────────────────────────────────┘
 ```
 
 ### Relay Node Architecture
@@ -217,20 +222,20 @@ Pushes to `clawdanoai/stretto` on Docker Hub.
 Upstream Peer (N2N)
     │
     ▼
-[BlockSyncPipeline] ──store──▶ [RocksDB]
-    │                              ▲
-    └──publish──▶ [fs2 Topic]      │
-                      │            │
-               ┌──────┼──────┐    │
-               │      │      │    │
-             Client1 Client2 ...  │
-               │                  │
-               └───read blocks────┘
+[BlockSyncPipeline] ──store──▶ [RocksDB] ◀──read──┐
+    │                              ▲                │
+    └──publish──▶ [fs2 Topic]      │                │
+                      │            │                │
+               ┌──────┼──────┐    │         ┌──────┴──────┐
+               │      │      │    │         │             │
+          N2C Client  ...   N2N Peer   [MetricsServer]
+               │             │                │
+               └──read───────┘          :9090/metrics
 ```
 
 ## Why Scala?
 
-- **Type system** — ADTs, pattern matching, and opaque types are natural for modeling ledger rules and protocol state machines
+- **Type system** — ADTs, pattern matching, and opaque types for ledger rules and protocol state machines
 - **Native Plutus evaluation** — scalus provides a Scala 3 Plutus Core evaluator (CEK machine)
 - **Performance** — JVM with Java 21 virtual threads, modern GC, mature JIT
 - **Effect system** — cats-effect + fs2 for safe concurrency and streaming
@@ -238,34 +243,44 @@ Upstream Peer (N2N)
 
 ## Key Dependencies
 
-| Library | Language | Purpose |
-|---------|----------|---------|
-| [scalus](https://github.com/nau/scalus) | Scala 3 | Plutus V1/V2/V3 script evaluation (CEK machine) |
-| [scodec](https://scodec.org/) | Scala 3 | Binary codec primitives for CBOR and mux framing |
-| [cats-effect](https://typelevel.org/cats-effect/) | Scala 3 | Asynchronous effect system (IO) |
-| [fs2](https://fs2.io/) | Scala 3 | Functional streaming and TCP networking |
-| [http4s](https://http4s.org/) | Scala 3 | Metrics and API server |
-| [RocksDB](https://rocksdb.org/) | C++/JNI | Persistent key-value storage |
+| Library | Purpose |
+|---------|---------|
+| [scalus](https://github.com/nau/scalus) | Plutus V1/V2/V3 script evaluation |
+| [scodec](https://scodec.org/) | Binary codec primitives for CBOR and mux framing |
+| [cats-effect](https://typelevel.org/cats-effect/) | Asynchronous effect system (IO) |
+| [fs2](https://fs2.io/) | Functional streaming and TCP networking |
+| [http4s](https://http4s.org/) | Metrics HTTP server |
+| [RocksDB](https://rocksdb.org/) | Persistent key-value storage |
+| [BouncyCastle](https://www.bouncycastle.org/) | Ed25519, Blake2b cryptographic primitives |
 
-> Ouroboros miniprotocols (Handshake, ChainSync, BlockFetch) and CBOR codecs are implemented from scratch in pure Scala — no external Cardano Java libraries.
+> Ouroboros miniprotocols (Handshake, ChainSync, BlockFetch, KeepAlive) and CBOR codecs are implemented from scratch in pure Scala.
 
 ## Progress
 
 | Module | Status | Highlights |
 |--------|--------|------------|
-| **core** | Done | Opaque types, Point, Tip, Block ADTs |
-| **serialization** | Done | CBOR primitives, all-era block decoder |
-| **network** | Done | Handshake (N2N+N2C), ChainSync (client+server), BlockFetch, KeepAlive, Mux |
+| **core** | Done | Opaque types, Point, Tip, Block ADTs, Ed25519, VRF |
+| **serialization** | Done | CBOR primitives, all-era block decoder with consensus fields |
+| **network** | Done | N2N client+server, N2C server, Handshake, ChainSync, BlockFetch, KeepAlive |
 | **storage** | Done | RocksDB with 5 column families, atomic batch writes |
-| **ledger** | Partial | UTxO state, block applicator (all eras) |
-| **node** | Done | Block sync pipeline, relay node, N2C listener |
-| **cli** | Done | sync-headers, sync-blocks, relay commands |
-| **consensus** | Planned | Ouroboros Praos, chain selection |
+| **consensus** | Done | Ouroboros Praos: header validation, KES, VRF, leader check, epoch state, chain selection |
+| **kes** | Done | Standalone CompactSum6KES library (`cardano.kes`) |
+| **ledger** | Partial | UTxO state, block applicator, 6 validation rules |
+| **node** | Done | Sync pipeline, relay node, N2N/N2C listeners, metrics server |
+| **cli** | Done | relay, sync-blocks, sync-headers commands |
 | **mempool** | Planned | Transaction pool |
+
+### Verified Sync Performance
+
+| Network | Blocks | Time | Rate |
+|---------|--------|------|------|
+| **Mainnet** | ~13.2M | ~10 hours | ~3,300 blocks/sec |
+| **Preprod** | ~4.5M | ~8 min | ~9,400 blocks/sec |
+| **Preview** | Full chain | ~6 min | — |
 
 ## Testing
 
-287 tests passing, 9 ignored (integration tests requiring live nodes).
+403 tests passing, 9 ignored (integration tests requiring live nodes).
 
 ```bash
 sbt test
@@ -276,11 +291,9 @@ sbt test
 | Name | Language | Organization | Status |
 |------|----------|-------------|--------|
 | [cardano-node](https://github.com/IntersectMBO/cardano-node) | Haskell | Intersect | Production (reference) |
-| [Amaru](https://github.com/pragma-org/amaru) | Rust | PRAGMA | Alpha (relay-capable) |
+| [Amaru](https://github.com/pragma-org/amaru) | Rust | PRAGMA | Alpha |
 | [Dingo](https://github.com/blinklabs-io/dingo) | Go | Blink Labs | Active development |
-| [Torsten](https://github.com/michaeljfazio/torsten) | Rust | Sandstone Pool | Alpha |
-| [Acropolis](https://github.com/input-output-hk/acropolis) | Rust | IOG | In development |
-| **Stretto** | **Scala 3** | **Clawdano** | **Relay-capable** |
+| **Stretto** | **Scala 3** | **Clawdano** | **Relay-capable, syncing all networks** |
 
 ## Vibe-Coded
 
