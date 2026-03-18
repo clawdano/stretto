@@ -1,6 +1,7 @@
 package stretto.node
 
 import cats.effect.IO
+import cats.syntax.all.*
 import fs2.concurrent.Topic
 import fs2.io.net.Socket
 import org.typelevel.log4cats.slf4j.Slf4jLogger
@@ -41,6 +42,7 @@ object N2NConnectionHandler:
   ): IO[Unit] =
     for
       mux <- MuxDemuxer(socket)
+      _   <- logger.debug("N2N: mux created, starting handshake")
       version <- HandshakeMessage
         .handshakeN2NServer(mux, networkMagic)
         .timeoutTo(
@@ -51,11 +53,11 @@ object N2NConnectionHandler:
       chainSync  = new ChainSyncServerN2N(mux, store, tipTopic)
       blockFetch = new BlockFetchServer(mux, store)
       keepAlive  = new KeepAliveClient(mux)
-      // Run ChainSync server, BlockFetch server, and KeepAlive responder concurrently
-      _ <- IO
-        .race(
-          IO.race(chainSync.serve, blockFetch.serve),
-          keepAlive.respondLoop
-        )
-        .void
+      // Run ChainSync server, BlockFetch server, and KeepAlive responder concurrently.
+      // All three block forever; if any exits (error or client done), the handler cleans up.
+      _ <- (
+        chainSync.serve.handleErrorWith(e => logger.warn(s"N2N ChainSync server error: ${e.getMessage}")),
+        blockFetch.serve.handleErrorWith(e => logger.warn(s"N2N BlockFetch server error: ${e.getMessage}")),
+        keepAlive.respondLoop
+      ).parTupled.void
     yield ()
