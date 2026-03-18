@@ -254,6 +254,7 @@ object Main extends IOApp:
       dbPath: Option[String] = None,
       maxN2NPeers: Int = 16,
       maxN2CClients: Int = 32,
+      metricsPort: Int = 0,
       networkMagic: Option[Long] = None,
       keepAliveInterval: Int = 10
   )
@@ -289,6 +290,10 @@ object Main extends IOApp:
         value.toIntOption match
           case Some(n) if n > 0 => parseRelayArgs(rest, config.copy(maxN2CClients = n))
           case _                => Left(s"Invalid max-n2c-clients: $value")
+      case "--metrics-port" :: value :: rest =>
+        value.toIntOption match
+          case Some(n) if n >= 0 => parseRelayArgs(rest, config.copy(metricsPort = n))
+          case _                 => Left(s"Invalid metrics-port: $value")
       case "--magic" :: value :: rest =>
         value.toLongOption match
           case Some(n) => parseRelayArgs(rest, config.copy(networkMagic = Some(n)))
@@ -331,6 +336,7 @@ object Main extends IOApp:
             listenHost = config.listenHost,
             n2nListenPort = config.n2nPort,
             n2cListenPort = config.n2cPort,
+            metricsPort = config.metricsPort,
             dbPath = db,
             maxN2NPeers = config.maxN2NPeers,
             maxN2CClients = config.maxN2CClients,
@@ -516,6 +522,7 @@ object Main extends IOApp:
       |  -d, --db <path>            Database directory (default: ./data/<network>-relay)
       |      --max-n2n-peers <n>    Max concurrent N2N peers (default: 16)
       |      --max-n2c-clients <n>  Max concurrent N2C clients (default: 32)
+      |      --metrics-port <port>  Prometheus metrics port (default: disabled, 0 = disabled)
       |      --keep-alive-interval <s>  KeepAlive ping interval in seconds (default: 10)
       |      --magic <number>       Custom network magic (overrides --network)
       |  -h, --help                 Show this help

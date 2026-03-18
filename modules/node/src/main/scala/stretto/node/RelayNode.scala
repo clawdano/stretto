@@ -1,6 +1,6 @@
 package stretto.node
 
-import cats.effect.IO
+import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import fs2.concurrent.Topic
 import org.typelevel.log4cats.slf4j.Slf4jLogger
@@ -29,6 +29,7 @@ object RelayNode:
       listenHost: String,
       n2nListenPort: Int = 3001, // N2N peer-to-peer, 0 = disabled
       n2cListenPort: Int = 0,    // N2C local clients, 0 = disabled
+      metricsPort: Int = 0,      // Prometheus metrics, 0 = disabled
       dbPath: Path,
       maxN2NPeers: Int = 16,
       maxN2CClients: Int = 32,
@@ -46,11 +47,12 @@ object RelayNode:
   def run(config: Config): IO[Nothing] =
     RocksDbStore.open(config.dbPath).use { store =>
       for
-        tipTopic <- Topic[IO, ChainEvent]
-        _        <- logger.info(s"Stretto Relay Node starting")
-        _        <- logger.info(s"Network: ${config.networkName} (magic ${config.networkMagic})")
-        _        <- logger.info(s"Upstream: ${config.upstreamHost}:${config.upstreamPort}")
-        _        <- logger.info(s"Database: ${config.dbPath}")
+        tipTopic   <- Topic[IO, ChainEvent]
+        metricsRef <- Ref.of[IO, MetricsServer.Metrics](MetricsServer.Metrics())
+        _          <- logger.info(s"Stretto Relay Node starting")
+        _          <- logger.info(s"Network: ${config.networkName} (magic ${config.networkMagic})")
+        _          <- logger.info(s"Upstream: ${config.upstreamHost}:${config.upstreamPort}")
+        _          <- logger.info(s"Database: ${config.dbPath}")
         _ <-
           if config.n2nListenPort > 0
           then
@@ -63,7 +65,11 @@ object RelayNode:
               s"N2C listen: ${config.listenHost}:${config.n2cListenPort} (max ${config.maxN2CClients} clients)"
             )
           else logger.info("N2C server: disabled")
-        // Start upstream sync + optional N2N/N2C listeners concurrently
+        _ <-
+          if config.metricsPort > 0
+          then logger.info(s"Metrics: http://${config.listenHost}:${config.metricsPort}/metrics")
+          else logger.info("Metrics server: disabled")
+        // Start upstream sync + optional listeners concurrently
         genesis = GenesisConfig.forNetwork(config.networkName)
         n2nListener =
           if config.n2nListenPort > 0 then
@@ -88,10 +94,15 @@ object RelayNode:
               genesis
             )
           else IO.never[Nothing]
+        metricsServer =
+          if config.metricsPort > 0 then
+            MetricsServer.serve(config.listenHost, config.metricsPort, metricsRef, config.networkName)
+          else IO.never[Nothing]
         // All fibers run forever (IO[Nothing]).
-        upstreamFiber <- upstreamSyncLoop(config, store, tipTopic).start
+        upstreamFiber <- upstreamSyncLoop(config, store, tipTopic, metricsRef).start
         _             <- n2nListener.start
         _             <- n2cListener.start
+        _             <- metricsServer.start
         result        <- upstreamFiber.joinWithNever
       yield result
     }
@@ -103,7 +114,8 @@ object RelayNode:
   private def upstreamSyncLoop(
       config: Config,
       store: RocksDbStore,
-      tipTopic: Topic[IO, ChainEvent]
+      tipTopic: Topic[IO, ChainEvent],
+      metricsRef: Ref[IO, MetricsServer.Metrics]
   ): IO[Nothing] =
     def syncOnce: IO[BlockSyncPipeline.SyncProgress] =
       BlockSyncPipeline.syncWithTopic(
@@ -115,12 +127,23 @@ object RelayNode:
         tipTopic = tipTopic,
         keepAliveInterval = config.keepAliveInterval,
         onProgress = progress =>
-          logger.info(
-            s"Sync: ${progress.blocksStored} blocks " +
-              s"(slot ${progress.currentSlot.value}) " +
-              s"tip: slot ${progress.peerTipSlot.value} block ${progress.peerTipBlock.blockNoValue}" +
-              (if progress.rollbacks > 0 then s" | rollbacks: ${progress.rollbacks}" else "")
-          )
+          metricsRef.update(m =>
+            m.copy(
+              chainTipSlot = progress.currentSlot.value,
+              chainTipBlock = progress.blocksStored,
+              peerTipSlot = progress.peerTipSlot.value,
+              peerTipBlock = progress.peerTipBlock.blockNoValue,
+              syncedBlocks = progress.blocksStored,
+              syncedBytes = progress.blockBytes,
+              rollbacks = progress.rollbacks
+            )
+          ) *>
+            logger.info(
+              s"Sync: ${progress.blocksStored} blocks " +
+                s"(slot ${progress.currentSlot.value}) " +
+                s"tip: slot ${progress.peerTipSlot.value} block ${progress.peerTipBlock.blockNoValue}" +
+                (if progress.rollbacks > 0 then s" | rollbacks: ${progress.rollbacks}" else "")
+            )
       )
 
     def loop(attempt: Int): IO[Nothing] =

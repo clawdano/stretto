@@ -16,6 +16,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **VrfCert, OperationalCert, VrfResult** types — era-specific VRF handling (TPraos: dual nonce+leader certs; Praos: single cert), full OCert fields (hotVkey, counter, startKesPeriod, coldSignature)
 - **BlockDecoder consensus fields** — now parses VRF certs, OCerts, KES signatures, protocol versions from all Shelley+ era headers; captures raw header body CBOR for KES verification
 
+- **Prometheus metrics endpoint** — `/metrics` in Prometheus text format via http4s, enabled with `--metrics-port <port>`:
+  - Chain metrics: `stretto_chain_tip_slot`, `stretto_chain_tip_block`, `stretto_peer_tip_slot/block`, `stretto_sync_blocks_total`, `stretto_sync_bytes_total`, `stretto_sync_rollbacks_total`, `stretto_epoch`
+  - `stretto_chain_density` — ratio of blocks to slots (expected ~0.05 on mainnet), matching Haskell node's `fragmentChainDensity`
+  - `stretto_sync_progress` — 0.0 to 1.0 sync completion
+  - `stretto_n2n_peers_connected`, `stretto_n2c_clients_connected`, `stretto_keepalive_rtt_ms`
+  - Full JVM metrics: heap/non-heap memory, threads, GC collection time/count, uptime, system load, available processors
 - **N2N server** — accept inbound N2N peer connections, enabling stretto-to-stretto chaining:
   - **N2N Handshake responder** — server-side version negotiation for N2N versions 11-14
   - **N2N ChainSync server** — serve era-wrapped headers from RocksDB to downstream peers, with cursor tracking and Topic subscription for tip-following
