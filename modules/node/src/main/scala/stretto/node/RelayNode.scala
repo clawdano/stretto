@@ -27,11 +27,11 @@ object RelayNode:
       networkMagic: Long,
       networkName: String,
       listenHost: String,
-      listenPort: Int,
-      n2nListenPort: Int = 0, // 0 = disabled
+      n2nListenPort: Int = 3001, // N2N peer-to-peer, 0 = disabled
+      n2cListenPort: Int = 0,    // N2C local clients, 0 = disabled
       dbPath: Path,
-      maxClients: Int = 32,
       maxN2NPeers: Int = 16,
+      maxN2CClients: Int = 32,
       keepAliveInterval: FiniteDuration = 10.seconds
   )
 
@@ -50,15 +50,20 @@ object RelayNode:
         _        <- logger.info(s"Stretto Relay Node starting")
         _        <- logger.info(s"Network: ${config.networkName} (magic ${config.networkMagic})")
         _        <- logger.info(s"Upstream: ${config.upstreamHost}:${config.upstreamPort}")
-        _        <- logger.info(s"N2C listen: ${config.listenHost}:${config.listenPort}")
         _        <- logger.info(s"Database: ${config.dbPath}")
-        _        <- logger.info(s"Max N2C clients: ${config.maxClients}")
         _ <-
           if config.n2nListenPort > 0
           then
             logger.info(s"N2N listen: ${config.listenHost}:${config.n2nListenPort} (max ${config.maxN2NPeers} peers)")
-          else IO.unit
-        // Start upstream sync, N2C listener, and optionally N2N listener concurrently
+          else logger.info("N2N server: disabled")
+        _ <-
+          if config.n2cListenPort > 0
+          then
+            logger.info(
+              s"N2C listen: ${config.listenHost}:${config.n2cListenPort} (max ${config.maxN2CClients} clients)"
+            )
+          else logger.info("N2C server: disabled")
+        // Start upstream sync + optional N2N/N2C listeners concurrently
         genesis = GenesisConfig.forNetwork(config.networkName)
         n2nListener =
           if config.n2nListenPort > 0 then
@@ -71,22 +76,23 @@ object RelayNode:
               config.maxN2NPeers
             )
           else IO.never[Nothing]
-        // All three run forever (IO[Nothing]). race/both will never return normally.
+        n2cListener =
+          if config.n2cListenPort > 0 then
+            N2CListener.listen(
+              config.listenHost,
+              config.n2cListenPort,
+              store,
+              tipTopic,
+              config.networkMagic,
+              config.maxN2CClients,
+              genesis
+            )
+          else IO.never[Nothing]
+        // All fibers run forever (IO[Nothing]).
         upstreamFiber <- upstreamSyncLoop(config, store, tipTopic).start
-        n2cFiber <- N2CListener
-          .listen(
-            config.listenHost,
-            config.listenPort,
-            store,
-            tipTopic,
-            config.networkMagic,
-            config.maxClients,
-            genesis
-          )
-          .start
-        n2nFiber <- n2nListener.start
-        // Wait for any fiber to complete (they shouldn't — all return Nothing)
-        result <- upstreamFiber.joinWithNever
+        _             <- n2nListener.start
+        _             <- n2cListener.start
+        result        <- upstreamFiber.joinWithNever
       yield result
     }
 

@@ -248,12 +248,12 @@ object Main extends IOApp:
       network: Option[String] = None,
       peerHost: Option[String] = None,
       peerPort: Option[Int] = None,
-      listenHost: String = "127.0.0.1",
-      listenPort: Option[Int] = None,
-      n2nListenPort: Option[Int] = None,
+      listenHost: String = "0.0.0.0",
+      n2nPort: Int = 3001, // N2N on by default, 0 = disabled
+      n2cPort: Int = 0,    // N2C off by default, 0 = disabled
       dbPath: Option[String] = None,
-      maxClients: Int = 32,
       maxN2NPeers: Int = 16,
+      maxN2CClients: Int = 32,
       networkMagic: Option[Long] = None,
       keepAliveInterval: Int = 10
   )
@@ -269,28 +269,30 @@ object Main extends IOApp:
         parsePeer(value).flatMap { case (h, p) =>
           parseRelayArgs(rest, config.copy(peerHost = Some(h), peerPort = Some(p)))
         }
-      case ("--listen" | "-l") :: value :: rest =>
-        parsePeer(value).flatMap { case (h, p) =>
-          parseRelayArgs(rest, config.copy(listenHost = h, listenPort = Some(p)))
-        }
-      case ("--db" | "-d") :: value :: rest =>
-        parseRelayArgs(rest, config.copy(dbPath = Some(value)))
-      case "--max-clients" :: value :: rest =>
-        value.toIntOption match
-          case Some(n) if n > 0 => parseRelayArgs(rest, config.copy(maxClients = n))
-          case _                => Left(s"Invalid max-clients: $value")
-      case "--magic" :: value :: rest =>
-        value.toLongOption match
-          case Some(n) => parseRelayArgs(rest, config.copy(networkMagic = Some(n)))
-          case None    => Left(s"Invalid magic: $value")
+      case "--host" :: value :: rest =>
+        parseRelayArgs(rest, config.copy(listenHost = value))
       case "--n2n-port" :: value :: rest =>
         value.toIntOption match
-          case Some(n) if n > 0 => parseRelayArgs(rest, config.copy(n2nListenPort = Some(n)))
-          case _                => Left(s"Invalid n2n-port: $value")
+          case Some(n) if n >= 0 => parseRelayArgs(rest, config.copy(n2nPort = n))
+          case _                 => Left(s"Invalid n2n-port: $value")
+      case "--n2c-port" :: value :: rest =>
+        value.toIntOption match
+          case Some(n) if n >= 0 => parseRelayArgs(rest, config.copy(n2cPort = n))
+          case _                 => Left(s"Invalid n2c-port: $value")
+      case ("--db" | "-d") :: value :: rest =>
+        parseRelayArgs(rest, config.copy(dbPath = Some(value)))
       case "--max-n2n-peers" :: value :: rest =>
         value.toIntOption match
           case Some(n) if n > 0 => parseRelayArgs(rest, config.copy(maxN2NPeers = n))
           case _                => Left(s"Invalid max-n2n-peers: $value")
+      case "--max-n2c-clients" :: value :: rest =>
+        value.toIntOption match
+          case Some(n) if n > 0 => parseRelayArgs(rest, config.copy(maxN2CClients = n))
+          case _                => Left(s"Invalid max-n2c-clients: $value")
+      case "--magic" :: value :: rest =>
+        value.toLongOption match
+          case Some(n) => parseRelayArgs(rest, config.copy(networkMagic = Some(n)))
+          case None    => Left(s"Invalid magic: $value")
       case "--keep-alive-interval" :: value :: rest =>
         value.toIntOption match
           case Some(n) if n > 0 => parseRelayArgs(rest, config.copy(keepAliveInterval = n))
@@ -316,7 +318,6 @@ object Main extends IOApp:
 
       if peerHost.isEmpty then Left("No upstream peer specified. Use --peer host:port")
       else
-        val listenPort = config.listenPort.getOrElse(3001)
         val db = config.dbPath
           .map(Paths.get(_))
           .getOrElse(Paths.get(".", "data", s"$networkName-relay"))
@@ -328,11 +329,11 @@ object Main extends IOApp:
             networkMagic = m,
             networkName = networkName,
             listenHost = config.listenHost,
-            listenPort = listenPort,
-            n2nListenPort = config.n2nListenPort.getOrElse(0),
+            n2nListenPort = config.n2nPort,
+            n2cListenPort = config.n2cPort,
             dbPath = db,
-            maxClients = config.maxClients,
             maxN2NPeers = config.maxN2NPeers,
+            maxN2CClients = config.maxN2CClients,
             keepAliveInterval = scala.concurrent.duration.FiniteDuration(config.keepAliveInterval.toLong, "s")
           )
         )
@@ -503,24 +504,26 @@ object Main extends IOApp:
   private def printRelayUsage: IO[Unit] = IO.println(
     """Usage: stretto relay [options]
       |
-      |Run a lightweight N2C relay node. Syncs blocks from an upstream N2N peer
-      |and serves them to local N2C clients via ChainSync.
+      |Run a relay node. Syncs blocks from an upstream N2N peer and serves them
+      |to downstream N2N peers and/or local N2C clients.
       |
       |Options:
       |  -n, --network <name>       Network: mainnet, preprod, preview
       |  -p, --peer <host:port>     Upstream N2N peer address
-      |  -l, --listen <host:port>   N2C listen address (default: 127.0.0.1:3001)
-      |      --n2n-port <port>      N2N listen port for peer-to-peer serving (disabled by default)
+      |      --host <addr>          Bind address for listeners (default: 0.0.0.0)
+      |      --n2n-port <port>      N2N listen port (default: 3001, 0 = disabled)
+      |      --n2c-port <port>      N2C listen port (default: disabled, 0 = disabled)
       |  -d, --db <path>            Database directory (default: ./data/<network>-relay)
-      |      --max-clients <n>      Max concurrent N2C clients (default: 32)
       |      --max-n2n-peers <n>    Max concurrent N2N peers (default: 16)
+      |      --max-n2c-clients <n>  Max concurrent N2C clients (default: 32)
       |      --keep-alive-interval <s>  KeepAlive ping interval in seconds (default: 10)
       |      --magic <number>       Custom network magic (overrides --network)
       |  -h, --help                 Show this help
       |
       |Examples:
-      |  stretto relay --network preprod --peer panic-station:30010
-      |  stretto relay --network preprod --peer panic-station:30010 --listen 127.0.0.1:3001
-      |  stretto relay --network mainnet --peer relay:3001 --listen 0.0.0.0:3001 --max-clients 64
+      |  stretto relay --network preprod --peer upstream:3001
+      |  stretto relay --network preprod --peer upstream:3001 --n2c-port 3002
+      |  stretto relay --network mainnet --peer upstream:3001 --n2n-port 3001 --n2c-port 3002
+      |  stretto relay --network preprod --peer upstream:3001 --n2n-port 0  # N2N disabled
       |""".stripMargin
   )
