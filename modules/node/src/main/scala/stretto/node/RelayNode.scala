@@ -28,8 +28,10 @@ object RelayNode:
       networkName: String,
       listenHost: String,
       listenPort: Int,
+      n2nListenPort: Int = 0, // 0 = disabled
       dbPath: Path,
       maxClients: Int = 32,
+      maxN2NPeers: Int = 16,
       keepAliveInterval: FiniteDuration = 10.seconds
   )
 
@@ -51,22 +53,40 @@ object RelayNode:
         _        <- logger.info(s"N2C listen: ${config.listenHost}:${config.listenPort}")
         _        <- logger.info(s"Database: ${config.dbPath}")
         _        <- logger.info(s"Max N2C clients: ${config.maxClients}")
-        // Start upstream sync and N2C listener concurrently
+        _ <-
+          if config.n2nListenPort > 0
+          then
+            logger.info(s"N2N listen: ${config.listenHost}:${config.n2nListenPort} (max ${config.maxN2NPeers} peers)")
+          else IO.unit
+        // Start upstream sync, N2C listener, and optionally N2N listener concurrently
         genesis = GenesisConfig.forNetwork(config.networkName)
-        result <- IO
-          .both(
-            upstreamSyncLoop(config, store, tipTopic),
-            N2CListener.listen(
+        n2nListener =
+          if config.n2nListenPort > 0 then
+            N2NListener.listen(
               config.listenHost,
-              config.listenPort,
+              config.n2nListenPort,
               store,
               tipTopic,
               config.networkMagic,
-              config.maxClients,
-              genesis
+              config.maxN2NPeers
             )
+          else IO.never[Nothing]
+        // All three run forever (IO[Nothing]). race/both will never return normally.
+        upstreamFiber <- upstreamSyncLoop(config, store, tipTopic).start
+        n2cFiber <- N2CListener
+          .listen(
+            config.listenHost,
+            config.listenPort,
+            store,
+            tipTopic,
+            config.networkMagic,
+            config.maxClients,
+            genesis
           )
-          .map(_._2) // Both return Nothing
+          .start
+        n2nFiber <- n2nListener.start
+        // Wait for any fiber to complete (they shouldn't — all return Nothing)
+        result <- upstreamFiber.joinWithNever
       yield result
     }
 

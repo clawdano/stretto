@@ -16,6 +16,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **VrfCert, OperationalCert, VrfResult** types — era-specific VRF handling (TPraos: dual nonce+leader certs; Praos: single cert), full OCert fields (hotVkey, counter, startKesPeriod, coldSignature)
 - **BlockDecoder consensus fields** — now parses VRF certs, OCerts, KES signatures, protocol versions from all Shelley+ era headers; captures raw header body CBOR for KES verification
 
+- **N2N server** — accept inbound N2N peer connections, enabling stretto-to-stretto chaining:
+  - **N2N Handshake responder** — server-side version negotiation for N2N versions 11-14
+  - **N2N ChainSync server** — serve era-wrapped headers from RocksDB to downstream peers, with cursor tracking and Topic subscription for tip-following
+  - **BlockFetch server** — serve full blocks from RocksDB on MsgRequestRange, with range streaming (MsgStartBatch → MsgBlock* → MsgBatchDone)
+  - **KeepAlive responder** — echo MsgKeepAliveResponse for incoming pings
+  - **N2N TCP listener** — accept inbound N2N connections with Semaphore-gated max peers (default 16)
+  - **CLI** — `--n2n-port <port>` and `--max-n2n-peers <n>` flags for relay command (disabled by default)
+
 ### Fixed
 - **ChainSync tip-following stall** — pipelined sync would stall for ~33min after reaching tip because 99 remaining in-flight requests each required a new block (~20s). Root cause: fixed 100-request window with no tip-proximity awareness. Fix: adaptive pipelining that compares each response's slot with the peer's tip slot; when within 600 slots (~10min), stops sending replacement requests, naturally draining the window to 0 before hitting MsgAwaitReply. Also fixed drain error handling (old `case _ => None` could corrupt protocol state). On reconnect near tip, the window now shrinks immediately instead of firing 100 requests into a 0-block gap.
 

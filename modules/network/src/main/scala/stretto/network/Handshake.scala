@@ -307,6 +307,31 @@ object HandshakeMessage:
       _ <- mux.sendResponse(MiniProtocolId.Handshake.id, response)
     yield acceptedVersion
 
+  /** N2N version numbers we support as server. */
+  val n2nVersions: Set[Int] = Set(11, 12, 13, 14)
+
+  /**
+   * Server-side N2N handshake: receive MsgProposeVersions, negotiate, send MsgAcceptVersion.
+   *
+   * Returns the accepted version number.
+   */
+  def handshakeN2NServer(mux: MuxDemuxer, networkMagic: Long): IO[Int] =
+    import cats.effect.IO
+    for
+      payload <- mux.recvProtocol(MiniProtocolId.Handshake.id)
+      versions <- IO.fromEither(
+        decodeProposeVersions(payload).left.map(e => new RuntimeException(s"N2N handshake decode error: $e"))
+      )
+      mutualVersions = versions.keySet.intersect(n2nVersions)
+      _ <- IO.raiseWhen(mutualVersions.isEmpty)(
+        new RuntimeException(s"No mutual N2N version found. Client proposed: ${versions.keySet.mkString(", ")}")
+      )
+      acceptedVersion = mutualVersions.max
+      versionData     = n2nVersionData(acceptedVersion, networkMagic)
+      response        = encode(HandshakeMessage.MsgAcceptVersion(acceptedVersion, versionData))
+      _ <- mux.sendResponse(MiniProtocolId.Handshake.id, response)
+    yield acceptedVersion
+
   /** Build a MsgProposeVersions for N2N with versions 11-14. */
   def handshakeClient(networkMagic: Long): HandshakeMessage =
     val versions = (11 to 14).map { v =>

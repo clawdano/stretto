@@ -250,8 +250,10 @@ object Main extends IOApp:
       peerPort: Option[Int] = None,
       listenHost: String = "127.0.0.1",
       listenPort: Option[Int] = None,
+      n2nListenPort: Option[Int] = None,
       dbPath: Option[String] = None,
       maxClients: Int = 32,
+      maxN2NPeers: Int = 16,
       networkMagic: Option[Long] = None,
       keepAliveInterval: Int = 10
   )
@@ -281,6 +283,14 @@ object Main extends IOApp:
         value.toLongOption match
           case Some(n) => parseRelayArgs(rest, config.copy(networkMagic = Some(n)))
           case None    => Left(s"Invalid magic: $value")
+      case "--n2n-port" :: value :: rest =>
+        value.toIntOption match
+          case Some(n) if n > 0 => parseRelayArgs(rest, config.copy(n2nListenPort = Some(n)))
+          case _                => Left(s"Invalid n2n-port: $value")
+      case "--max-n2n-peers" :: value :: rest =>
+        value.toIntOption match
+          case Some(n) if n > 0 => parseRelayArgs(rest, config.copy(maxN2NPeers = n))
+          case _                => Left(s"Invalid max-n2n-peers: $value")
       case "--keep-alive-interval" :: value :: rest =>
         value.toIntOption match
           case Some(n) if n > 0 => parseRelayArgs(rest, config.copy(keepAliveInterval = n))
@@ -319,8 +329,10 @@ object Main extends IOApp:
             networkName = networkName,
             listenHost = config.listenHost,
             listenPort = listenPort,
+            n2nListenPort = config.n2nListenPort.getOrElse(0),
             dbPath = db,
             maxClients = config.maxClients,
+            maxN2NPeers = config.maxN2NPeers,
             keepAliveInterval = scala.concurrent.duration.FiniteDuration(config.keepAliveInterval.toLong, "s")
           )
         )
@@ -498,8 +510,10 @@ object Main extends IOApp:
       |  -n, --network <name>       Network: mainnet, preprod, preview
       |  -p, --peer <host:port>     Upstream N2N peer address
       |  -l, --listen <host:port>   N2C listen address (default: 127.0.0.1:3001)
+      |      --n2n-port <port>      N2N listen port for peer-to-peer serving (disabled by default)
       |  -d, --db <path>            Database directory (default: ./data/<network>-relay)
       |      --max-clients <n>      Max concurrent N2C clients (default: 32)
+      |      --max-n2n-peers <n>    Max concurrent N2N peers (default: 16)
       |      --keep-alive-interval <s>  KeepAlive ping interval in seconds (default: 10)
       |      --magic <number>       Custom network magic (overrides --network)
       |  -h, --help                 Show this help
