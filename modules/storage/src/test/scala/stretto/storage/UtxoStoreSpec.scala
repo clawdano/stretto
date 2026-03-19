@@ -25,14 +25,13 @@ class UtxoStoreSpec extends CatsEffectSuite:
       for
         _      <- store.putUtxo(txHash1, 0L, output)
         result <- store.getUtxo(input)
-      yield {
+      yield
         assert(result.isDefined)
         val got = result.get
         assertEquals(got.address, addr1)
         got.value match
           case OutputValue.PureAda(c) => assertEquals(c, Lovelace(5000000L))
           case _                      => fail("expected PureAda")
-      }
     }
   }
 
@@ -44,7 +43,7 @@ class UtxoStoreSpec extends CatsEffectSuite:
       for
         _      <- store.putUtxo(txHash1, 1L, output)
         result <- store.getUtxo(input)
-      yield {
+      yield
         assert(result.isDefined)
         val got = result.get
         got.value match
@@ -52,7 +51,6 @@ class UtxoStoreSpec extends CatsEffectSuite:
             assertEquals(c, Lovelace(2000000L))
             assertEquals(a, assets)
           case _ => fail("expected MultiAsset")
-      }
     }
   }
 
@@ -72,10 +70,9 @@ class UtxoStoreSpec extends CatsEffectSuite:
         before <- store.getUtxo(input)
         _      <- store.deleteUtxo(input)
         after  <- store.getUtxo(input)
-      yield {
+      yield
         assert(before.isDefined)
         assert(after.isEmpty)
-      }
     }
   }
 
@@ -86,14 +83,13 @@ class UtxoStoreSpec extends CatsEffectSuite:
       val input2  = TxInput(txHash2, 0L)
       val output2 = TxOutput(addr1, OutputValue.PureAda(Lovelace(3000000L)))
       for
-        _          <- store.putUtxo(txHash1, 0L, output1)
-        _          <- store.applyUtxoDelta(consumed = List(input1), produced = List((input2, output2)))
-        oldResult  <- store.getUtxo(input1)
-        newResult  <- store.getUtxo(input2)
-      yield {
+        _         <- store.putUtxo(txHash1, 0L, output1)
+        _         <- store.applyUtxoDelta(consumed = List(input1), produced = List((input2, output2)))
+        oldResult <- store.getUtxo(input1)
+        newResult <- store.getUtxo(input2)
+      yield
         assert(oldResult.isEmpty, "consumed output should be gone")
         assert(newResult.isDefined, "produced output should exist")
-      }
     }
   }
 
@@ -105,10 +101,9 @@ class UtxoStoreSpec extends CatsEffectSuite:
         _      <- store.applyUtxoDeltaWithHeight(consumed = List.empty, produced = List((input, output)), BlockNo(42L))
         height <- store.getLedgerHeight
         utxo   <- store.getUtxo(input)
-      yield {
+      yield
         assertEquals(height, Some(BlockNo(42L)))
         assert(utxo.isDefined)
-      }
     }
   }
 

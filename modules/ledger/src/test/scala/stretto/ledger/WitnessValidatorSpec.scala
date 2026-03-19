@@ -120,7 +120,7 @@ class WitnessValidatorSpec extends FunSuite:
     )
 
     // No witnesses needed for script credential
-    val errors = WitnessValidator.verify(body, Vector.empty, utxos, txHash1)
+    val errors           = WitnessValidator.verify(body, Vector.empty, utxos, txHash1)
     val missingWitErrors = errors.collect { case e: WitnessValidator.WitnessError.MissingWitness => e }
     assert(missingWitErrors.isEmpty, "script credentials should not require vkey witnesses")
   }

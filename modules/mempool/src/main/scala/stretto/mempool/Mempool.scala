@@ -44,16 +44,19 @@ final class Mempool private (
       state <- stateRef.get
       // Check if already in mempool
       result <-
-        if state.txs.contains(txHash) then
-          IO.pure(Right(txHash)) // idempotent
+        if state.txs.contains(txHash) then IO.pure(Right(txHash)) // idempotent
         else
           // Build virtual UTxO view: chain + mempool overlay
           buildUtxoView(tx.inputs, state).flatMap { virtualUtxos =>
             val errors = TransactionValidation.validateFullTx(
-              tx, witnesses, txHash, virtualUtxos, params, currentSlot
+              tx,
+              witnesses,
+              txHash,
+              virtualUtxos,
+              params,
+              currentSlot
             )
-            if errors.nonEmpty then
-              IO.pure(Left(errors.map(_.toString)))
+            if errors.nonEmpty then IO.pure(Left(errors.map(_.toString)))
             else
               // Add to mempool
               val mempoolTx = MempoolTx(
@@ -90,8 +93,8 @@ final class Mempool private (
    */
   def removeTxs(confirmed: Set[TxHash]): IO[Unit] =
     stateRef.update { st =>
-      val toRemove = st.txs.filter { case (h, _) => confirmed.contains(h) }
-      val removedInputs  = toRemove.values.flatMap(_.body.inputs).toSet
+      val toRemove      = st.txs.filter { case (h, _) => confirmed.contains(h) }
+      val removedInputs = toRemove.values.flatMap(_.body.inputs).toSet
       val removedOutputs = toRemove.values.flatMap { tx =>
         tx.body.outputs.zipWithIndex.map { case (_, idx) => TxInput(tx.txHash, idx.toLong) }
       }.toSet
@@ -128,17 +131,19 @@ final class Mempool private (
       inputs: Vector[TxInput],
       state: MempoolState
   ): IO[Map[TxInput, TxOutput]] =
-    inputs.toList.traverse { input =>
-      // Check mempool overlay first (produced outputs)
-      state.producedOutputs.get(input) match
-        case Some(output) => IO.pure(Some(input -> output))
-        case None =>
-          // Check if consumed by another mempool tx (double-spend)
-          if state.consumedInputs.contains(input) then IO.pure(None)
-          else
-            // Look up from chain UTxO
-            utxoLookup(input).map(_.map(out => input -> out))
-    }.map(_.flatten.toMap)
+    inputs.toList
+      .traverse { input =>
+        // Check mempool overlay first (produced outputs)
+        state.producedOutputs.get(input) match
+          case Some(output) => IO.pure(Some(input -> output))
+          case None         =>
+            // Check if consumed by another mempool tx (double-spend)
+            if state.consumedInputs.contains(input) then IO.pure(None)
+            else
+              // Look up from chain UTxO
+              utxoLookup(input).map(_.map(out => input -> out))
+      }
+      .map(_.flatten.toMap)
 
   /** Evict lowest-fee-density transaction to make room. */
   private def evict(st: MempoolState): MempoolState =
@@ -146,7 +151,7 @@ final class Mempool private (
     else
       val lowestFee = st.txs.values.minBy(_.feePerByte)
       val inputs    = lowestFee.body.inputs.toSet
-      val outputs   = lowestFee.body.outputs.zipWithIndex.map { case (_, idx) =>
+      val outputs = lowestFee.body.outputs.zipWithIndex.map { case (_, idx) =>
         TxInput(lowestFee.txHash, idx.toLong)
       }.toSet
       st.copy(

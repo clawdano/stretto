@@ -60,16 +60,22 @@ class WitnessDecoderSpec extends FunSuite:
 
   test("all block fixtures still decode after witness parsing changes") {
     val fixtures = List(
-      "byron1.block", "byron2.block", "byron4.block",
-      "shelley1.block", "allegra1.block", "mary1.block",
-      "alonzo1.block", "alonzo9.block",
-      "babbage1.block", "conway1.block"
+      "byron1.block",
+      "byron2.block",
+      "byron4.block",
+      "shelley1.block",
+      "allegra1.block",
+      "mary1.block",
+      "alonzo1.block",
+      "alonzo9.block",
+      "babbage1.block",
+      "conway1.block"
     )
     fixtures.foreach { name =>
       val path = Paths.get("modules/serialization/src/test/resources/blocks", name)
       if Files.exists(path) then
-        val hex   = new String(Files.readAllBytes(path)).trim
-        val bytes = ByteVector.fromValidHex(hex)
+        val hex    = new String(Files.readAllBytes(path)).trim
+        val bytes  = ByteVector.fromValidHex(hex)
         val result = BlockDecoder.decode(bytes)
         assert(result.isRight, s"$name should decode successfully: ${result.left.getOrElse("")}")
     }

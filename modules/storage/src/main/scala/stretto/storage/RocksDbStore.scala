@@ -348,8 +348,8 @@ final class RocksDbStore private (
         ((bytes(1) & 0xff) << 16) |
         ((bytes(2) & 0xff) << 8) |
         (bytes(3) & 0xff)
-    val address = ByteVector.view(bytes, 4, addrLen)
-    val tag     = bytes(4 + addrLen) & 0xff
+    val address    = ByteVector.view(bytes, 4, addrLen)
+    val tag        = bytes(4 + addrLen) & 0xff
     val coinOffset = 4 + addrLen + 1
     val coin = Lovelace(
       ((bytes(coinOffset).toLong & 0xff) << 56) |

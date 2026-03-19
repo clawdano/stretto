@@ -385,8 +385,8 @@ object BlockDecoder:
       offset: Int,
       mapLen: Long
   ): Either[String, (TxWitnessSet, Int)] =
-    var pos              = offset
-    var vkeys            = Vector.empty[VkeyWitness]
+    var pos                               = offset
+    var vkeys                             = Vector.empty[VkeyWitness]
     var bootstrapWit: Option[ByteVector]  = None
     var nativeScripts: Option[ByteVector] = None
     var plutusV1: Option[ByteVector]      = None
@@ -405,44 +405,43 @@ object BlockDecoder:
             key.toInt match
               case 0 => // vkey witnesses
                 decodeVkeyWitnessArray(bytes, afterKey) match
-                  case Left(err) => error = Some(err)
+                  case Left(err)          => error = Some(err)
                   case Right((vks, next)) => vkeys = vks; pos = next
               case 1 => // native scripts
                 extractRawBytes(bytes, afterKey) match
-                  case Left(err) => error = Some(err)
+                  case Left(err)          => error = Some(err)
                   case Right((raw, next)) => nativeScripts = Some(raw); pos = next
               case 2 => // bootstrap witnesses
                 extractRawBytes(bytes, afterKey) match
-                  case Left(err) => error = Some(err)
+                  case Left(err)          => error = Some(err)
                   case Right((raw, next)) => bootstrapWit = Some(raw); pos = next
               case 3 => // plutus v1 scripts
                 extractRawBytes(bytes, afterKey) match
-                  case Left(err) => error = Some(err)
+                  case Left(err)          => error = Some(err)
                   case Right((raw, next)) => plutusV1 = Some(raw); pos = next
               case 4 => // plutus data (datums)
                 extractRawBytes(bytes, afterKey) match
-                  case Left(err) => error = Some(err)
+                  case Left(err)          => error = Some(err)
                   case Right((raw, next)) => plutusData = Some(raw); pos = next
               case 5 => // redeemers
                 extractRawBytes(bytes, afterKey) match
-                  case Left(err) => error = Some(err)
+                  case Left(err)          => error = Some(err)
                   case Right((raw, next)) => redeemers = Some(raw); pos = next
               case 6 => // plutus v2 scripts
                 extractRawBytes(bytes, afterKey) match
-                  case Left(err) => error = Some(err)
+                  case Left(err)          => error = Some(err)
                   case Right((raw, next)) => plutusV2 = Some(raw); pos = next
               case 7 => // plutus v3 scripts
                 extractRawBytes(bytes, afterKey) match
-                  case Left(err) => error = Some(err)
+                  case Left(err)          => error = Some(err)
                   case Right((raw, next)) => plutusV3 = Some(raw); pos = next
               case _ =>
                 skipItem(bytes, afterKey) match
-                  case Left(err) => error = Some(err)
+                  case Left(err)        => error = Some(err)
                   case Right((_, next)) => pos = next
 
     if mapLen == IndefiniteLength then
-      while error.isEmpty && pos < bytes.size && (bytes(pos.toLong) & 0xff) != BreakByte do
-        parseEntry()
+      while error.isEmpty && pos < bytes.size && (bytes(pos.toLong) & 0xff) != BreakByte do parseEntry()
       if error.isEmpty then pos += 1
     else
       var i = 0
@@ -453,7 +452,9 @@ object BlockDecoder:
     error match
       case Some(err) => Left(err)
       case None =>
-        Right((TxWitnessSet(vkeys, bootstrapWit, nativeScripts, plutusV1, plutusV2, plutusV3, plutusData, redeemers), pos))
+        Right(
+          (TxWitnessSet(vkeys, bootstrapWit, nativeScripts, plutusV1, plutusV2, plutusV3, plutusData, redeemers), pos)
+        )
 
   /** Decode an array of VkeyWitnesses. */
   private def decodeVkeyWitnessArray(bytes: ByteVector, offset: Int): Either[String, (Vector[VkeyWitness], Int)] =
@@ -475,10 +476,10 @@ object BlockDecoder:
   /** Decode a single vkey witness: [vkey, signature] */
   private def decodeVkeyWitness(bytes: ByteVector, offset: Int): Either[String, (VkeyWitness, Int)] =
     for
-      (arrLen, afterArr)   <- readArrayHeader(bytes, offset)
-      (vkey, afterVkey)    <- readByteString(bytes, afterArr)
-      (sig, afterSig)      <- readByteString(bytes, afterVkey)
-      afterEnd             <- if arrLen == IndefiniteLength then consumeBreak(bytes, afterSig) else Right(afterSig)
+      (arrLen, afterArr) <- readArrayHeader(bytes, offset)
+      (vkey, afterVkey)  <- readByteString(bytes, afterArr)
+      (sig, afterSig)    <- readByteString(bytes, afterVkey)
+      afterEnd           <- if arrLen == IndefiniteLength then consumeBreak(bytes, afterSig) else Right(afterSig)
     yield (VkeyWitness(vkey, sig), afterEnd)
 
   // ---------------------------------------------------------------------------
@@ -506,7 +507,7 @@ object BlockDecoder:
       (isValid, afterValid) <- readIsValid(bytes, afterWit)
       // 4. Auxiliary data (skip, capture raw or null)
       (auxRaw, afterAux) <- extractOptionalRaw(bytes, afterValid)
-      afterEnd <- if arrLen == IndefiniteLength then consumeBreak(bytes, afterAux) else Right(afterAux)
+      afterEnd           <- if arrLen == IndefiniteLength then consumeBreak(bytes, afterAux) else Right(afterAux)
     yield Transaction(
       body = txBody,
       witnesses = witnesses,
@@ -529,10 +530,10 @@ object BlockDecoder:
       val major = b >> 5
       if major == 7 then // simple value (bool)
         val ai = b & 0x1f
-        if ai == 20 then Right((false, offset + 1))       // false
-        else if ai == 21 then Right((true, offset + 1))   // true
-        else Right((true, offset + 1))                     // other simple → true
-      else // uint
+        if ai == 20 then Right((false, offset + 1))     // false
+        else if ai == 21 then Right((true, offset + 1)) // true
+        else Right((true, offset + 1))                  // other simple → true
+      else                                              // uint
         readUInt(bytes, offset).map { case (v, next) => (v != 0, next) }
 
   /** Extract optional raw CBOR — None if CBOR null, Some(raw) otherwise. */
@@ -709,10 +710,10 @@ object BlockDecoder:
 
   /** Intermediate state for tx body map parsing. */
   private final class TxBodyState:
-    var inputs: Vector[TxInput]              = Vector.empty
-    var outputs: Vector[TxOutput]            = Vector.empty
-    var fee: Lovelace                        = Lovelace(0L)
-    var ttl: Option[SlotNo]                  = None
+    var inputs: Vector[TxInput]               = Vector.empty
+    var outputs: Vector[TxOutput]             = Vector.empty
+    var fee: Lovelace                         = Lovelace(0L)
+    var ttl: Option[SlotNo]                   = None
     var validityIntervalStart: Option[SlotNo] = None
     var mint: Option[ByteVector]              = None
     var scriptDataHash: Option[Hash32]        = None
@@ -757,8 +758,8 @@ object BlockDecoder:
       offset: Int,
       mapLen: Long
   ): Either[String, (Int, TxBodyState)] =
-    var pos              = offset
-    val st               = new TxBodyState
+    var pos                   = offset
+    val st                    = new TxBodyState
     var error: Option[String] = None
 
     if mapLen == IndefiniteLength then
@@ -842,18 +843,20 @@ object BlockDecoder:
                   next
                 }
               else
-                (0 until count.toInt).foldLeft(
-                  Right((Vector.empty[Hash28], afterArr)): Either[String, (Vector[Hash28], Int)]
-                ) {
-                  case (Left(err), _) => Left(err)
-                  case (Right((acc, p)), _) =>
-                    readByteString(bytes, p).map { case (bs, next) =>
-                      (acc :+ Hash28.unsafeFrom(bs), next)
-                    }
-                }.map { case (signers, next) =>
-                  st.requiredSigners = signers
-                  next
-                }
+                (0 until count.toInt)
+                  .foldLeft(
+                    Right((Vector.empty[Hash28], afterArr)): Either[String, (Vector[Hash28], Int)]
+                  ) {
+                    case (Left(err), _) => Left(err)
+                    case (Right((acc, p)), _) =>
+                      readByteString(bytes, p).map { case (bs, next) =>
+                        (acc :+ Hash28.unsafeFrom(bs), next)
+                      }
+                  }
+                  .map { case (signers, next) =>
+                    st.requiredSigners = signers
+                    next
+                  }
             }
           case 15 => // network_id (Alonzo+)
             readUInt(bytes, afterKey).map { case (n, next) =>

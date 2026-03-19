@@ -38,10 +38,9 @@ class MempoolSpec extends CatsEffectSuite:
     for
       mp    <- Mempool.create(utxoLookup = emptyLookup)
       state <- mp.snapshot
-    yield {
+    yield
       assert(state.txs.isEmpty)
       assert(state.consumedInputs.isEmpty)
       assert(state.producedOutputs.isEmpty)
       assertEquals(state.totalBytes, 0L)
-    }
   }

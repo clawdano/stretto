@@ -51,7 +51,8 @@ final class LocalTxSubmissionServer(
     if len < 24 then ByteVector((0x80 | len).toByte)
     else ByteVector(0x98.toByte, len.toByte)
 
-  @annotation.unused private def cborByteString(bv: ByteVector): ByteVector =
+  @annotation.unused
+  private def cborByteString(bv: ByteVector): ByteVector =
     val len = bv.size
     val hdr =
       if len < 24 then ByteVector((0x40 | len.toInt).toByte)
@@ -112,18 +113,18 @@ final class LocalTxSubmissionServer(
               if eraWrapStart >= payload.size then Left("payload too short for era-wrapped tx")
               else
                 // Read inner array header
-                val ib0     = payload(eraWrapStart.toLong) & 0xff
-                val iMajor  = ib0 >> 5
+                val ib0    = payload(eraWrapStart.toLong) & 0xff
+                val iMajor = ib0 >> 5
                 if iMajor != 4 then Left(s"expected inner array, got major $iMajor")
                 else
-                  val iAi        = ib0 & 0x1f
-                  val eraTagOff  = if iAi < 24 then eraWrapStart + 1 else eraWrapStart + 2
+                  val iAi       = ib0 & 0x1f
+                  val eraTagOff = if iAi < 24 then eraWrapStart + 1 else eraWrapStart + 2
                   if eraTagOff >= payload.size then Left("payload too short for era tag")
                   else
-                    val eraTag   = (payload(eraTagOff.toLong) & 0xff).toLong
-                    val txStart  = eraTagOff + 1
+                    val eraTag  = (payload(eraTagOff.toLong) & 0xff).toLong
+                    val txStart = eraTagOff + 1
                     // Everything from txStart to end is the raw tx CBOR
-                    val txBytes  = payload.drop(txStart.toLong)
+                    val txBytes = payload.drop(txStart.toLong)
                     Right(ClientMsg.SubmitTx(eraTag.toInt, txBytes))
             case 3 => // MsgDone
               Right(ClientMsg.Done)
@@ -137,17 +138,20 @@ final class LocalTxSubmissionServer(
   /** Run the server loop. Returns when the client sends MsgDone. */
   def serve: IO[Unit] =
     def loop: IO[Unit] =
-      mux.recvProtocol(protoId).flatMap { payload =>
-        decodeClientMsg(payload) match
-          case Right(ClientMsg.SubmitTx(eraTag, txBytes)) =>
-            handleSubmitTx(eraTag, txBytes) *> loop
-          case Right(ClientMsg.Done) =>
-            logger.debug("LocalTxSubmission: client sent MsgDone")
-          case Left(err) =>
-            logger.warn(s"LocalTxSubmission decode error: $err") *> loop
-      }.handleErrorWith { err =>
-        logger.debug(s"LocalTxSubmission connection closed: ${err.getMessage}")
-      }
+      mux
+        .recvProtocol(protoId)
+        .flatMap { payload =>
+          decodeClientMsg(payload) match
+            case Right(ClientMsg.SubmitTx(eraTag, txBytes)) =>
+              handleSubmitTx(eraTag, txBytes) *> loop
+            case Right(ClientMsg.Done) =>
+              logger.debug("LocalTxSubmission: client sent MsgDone")
+            case Left(err) =>
+              logger.warn(s"LocalTxSubmission decode error: $err") *> loop
+        }
+        .handleErrorWith { err =>
+          logger.debug(s"LocalTxSubmission connection closed: ${err.getMessage}")
+        }
 
     loop
 

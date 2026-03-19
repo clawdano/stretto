@@ -49,8 +49,8 @@ final class LedgerState(store: RocksDbStore):
         else
           val allInputs = body.txPayload.flatMap(tx => tx.inputs.map(i => TxInput(i.txId, i.index)))
           lookupUtxos(allInputs).flatMap { utxoMap =>
-            val state  = UtxoState(utxoMap)
-            val result = BlockApplicator.apply(state, block)
+            val state    = UtxoState(utxoMap)
+            val result   = BlockApplicator.apply(state, block)
             val consumed = allInputs.filter(utxoMap.contains)
             val produced = body.txPayload.flatMap { tx =>
               tx.outputs.zipWithIndex.map { case (out, idx) =>
@@ -66,8 +66,8 @@ final class LedgerState(store: RocksDbStore):
         else
           val allInputs = txBodies.flatMap(_.inputs)
           lookupUtxos(allInputs).flatMap { utxoMap =>
-            val state  = UtxoState(utxoMap)
-            val result = BlockApplicator.apply(state, block, header.slotNo, Some(ProtocolParameters.forEra(era)))
+            val state    = UtxoState(utxoMap)
+            val result   = BlockApplicator.apply(state, block, header.slotNo, Some(ProtocolParameters.forEra(era)))
             val consumed = allInputs.filter(utxoMap.contains)
             val produced = txBodies.flatMap { tx =>
               val txHash = TxHash(Hash32.unsafeFrom(Crypto.blake2b256(tx.rawCbor)))

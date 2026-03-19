@@ -88,12 +88,14 @@ object RelayNode:
             )
           else IO.never[Nothing]
         // Current slot tracking for tx validation
-        currentSlotRef = () => store.getTip.map {
-          case Some(tip) => tip.point match
-            case bp: stretto.core.Point.BlockPoint => bp.slotNo
-            case _ => SlotNo(0L)
-          case None => SlotNo(0L)
-        }
+        currentSlotRef = () =>
+          store.getTip.map {
+            case Some(tip) =>
+              tip.point match
+                case bp: stretto.core.Point.BlockPoint => bp.slotNo
+                case _                                 => SlotNo(0L)
+            case None => SlotNo(0L)
+          }
         n2cListener =
           if config.n2cListenPort > 0 then
             N2CListener.listen(

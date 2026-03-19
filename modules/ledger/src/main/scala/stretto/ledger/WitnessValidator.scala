@@ -19,8 +19,10 @@ object WitnessValidator:
   enum WitnessError:
     /** No valid vkey witness found for the given payment key hash. */
     case MissingWitness(txHash: TxHash, keyHash: Hash28)
+
     /** Vkey witness has invalid Ed25519 signature. */
     case InvalidSignature(txHash: TxHash, vkey: ByteVector)
+
     /** Required signer key hash not covered by any witness. */
     case RequiredSignerMissing(txHash: TxHash, keyHash: Hash28)
 
@@ -67,16 +69,14 @@ object WitnessValidator:
       utxos.get(input).foreach { output =>
         Address.extractPaymentCredential(output.address) match
           case Some(PaymentCredential.PubKeyCredential(keyHash)) =>
-            if !validKeyHashes.contains(keyHash) then
-              errors = errors :+ WitnessError.MissingWitness(txHash, keyHash)
+            if !validKeyHashes.contains(keyHash) then errors = errors :+ WitnessError.MissingWitness(txHash, keyHash)
           case _ => () // Script credentials or Byron — skip for now
       }
     }
 
     // 4. Check required signers
     body.requiredSigners.foreach { keyHash =>
-      if !validKeyHashes.contains(keyHash) then
-        errors = errors :+ WitnessError.RequiredSignerMissing(txHash, keyHash)
+      if !validKeyHashes.contains(keyHash) then errors = errors :+ WitnessError.RequiredSignerMissing(txHash, keyHash)
     }
 
     errors
