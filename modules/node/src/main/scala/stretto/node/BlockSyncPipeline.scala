@@ -195,34 +195,34 @@ object BlockSyncPipeline:
 
     // Run validation concurrently with the main processing — fire-and-forget
     validationIO.start *>
-    // Delegate to the regular processBatch logic, then publish events
-    processBatch(blockFetchClient, syncer, progress, batch, onProgress, progressInterval).flatTap { newProgress =>
-      // Publish chain events for the batch
-      val forwards = batch.collect { case (ChainSyncResponse.RollForward(header, tip), _) =>
-        (header, tip)
-      }
-      val lastForward = forwards.lastOption
-      val rollbacks = batch.collect { case (ChainSyncResponse.RollBackward(point, tip), _) =>
-        (point, tip)
-      }
+      // Delegate to the regular processBatch logic, then publish events
+      processBatch(blockFetchClient, syncer, progress, batch, onProgress, progressInterval).flatTap { newProgress =>
+        // Publish chain events for the batch
+        val forwards = batch.collect { case (ChainSyncResponse.RollForward(header, tip), _) =>
+          (header, tip)
+        }
+        val lastForward = forwards.lastOption
+        val rollbacks = batch.collect { case (ChainSyncResponse.RollBackward(point, tip), _) =>
+          (point, tip)
+        }
 
-      // Publish rollback events
-      val rollbackPublish = rollbacks.traverse_ { case (point, tip) =>
-        tipTopic.publish1(ChainEvent.RolledBack(point, tip))
+        // Publish rollback events
+        val rollbackPublish = rollbacks.traverse_ { case (point, tip) =>
+          tipTopic.publish1(ChainEvent.RolledBack(point, tip))
+        }
+
+        // Publish block added for the last block in this batch
+        val forwardPublish = lastForward match
+          case Some((header, tip)) =>
+            HeaderParser.parse(header) match
+              case Right(meta) =>
+                val bp: Point.BlockPoint = Point.BlockPoint(meta.slotNo, meta.blockHash)
+                tipTopic.publish1(ChainEvent.BlockAdded(bp, tip)).void
+              case Left(_) => IO.unit
+          case None => IO.unit
+
+        rollbackPublish *> forwardPublish
       }
-
-      // Publish block added for the last block in this batch
-      val forwardPublish = lastForward match
-        case Some((header, tip)) =>
-          HeaderParser.parse(header) match
-            case Right(meta) =>
-              val bp: Point.BlockPoint = Point.BlockPoint(meta.slotNo, meta.blockHash)
-              tipTopic.publish1(ChainEvent.BlockAdded(bp, tip)).void
-            case Left(_) => IO.unit
-        case None => IO.unit
-
-      rollbackPublish *> forwardPublish
-    }
 
   private def pipelinedSyncLoop(
       chainSyncClient: ChainSyncClient,

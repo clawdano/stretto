@@ -81,14 +81,13 @@ final class PermissiveHeaderValidator(
         params = params
       )
 
-
       // Extract VRF output for nonce evolution (best-effort)
       vrfOutput = header.vrfResult match
         case VrfResult.Praos(cert)       => cert.output
         case VrfResult.TPraos(_, leader) => leader.output
 
       // Update consensus state: OCert counter + nonce evolution
-      issuerHash = Crypto.blake2b256(header.issuerVkey)
+      issuerHash   = Crypto.blake2b256(header.issuerVkey)
       shelleyStart = genesisConfig.shelleyStartSlot
       slotInEpoch = header.slotNo.value - shelleyStart -
         (currentEpoch - genesisConfig.byronShelleyTransitionEpoch) * genesisConfig.shelleyEpochLength

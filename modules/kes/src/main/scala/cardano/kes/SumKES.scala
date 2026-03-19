@@ -40,9 +40,11 @@ object SumKES:
   /** Calculate expected compact signature size for a given depth. */
   def compactSignatureSize(depth: Int): Int = 64 + 32 + 32 * depth
 
-  /** Calculate expected standard (wire) signature size for a given depth.
+  /**
+   * Calculate expected standard (wire) signature size for a given depth.
    *  Standard format: at each level stores (innerSig, leftVK(32), rightVK(32)).
-   *  Size(0) = 64 (Ed25519), Size(d) = Size(d-1) + 64 = 64 + d*64 */
+   *  Size(0) = 64 (Ed25519), Size(d) = Size(d-1) + 64 = 64 + d*64
+   */
   def standardSignatureSize(depth: Int): Int = 64 + depth * 64
 
   // Keep backward compat
@@ -72,14 +74,13 @@ object SumKES:
     val stdSize     = standardSignatureSize(depth)
     val compactSize = compactSignatureSize(depth)
 
-    if signature.size == stdSize && stdSize != compactSize then
-      verifyStandard(vk, period, message, signature, depth)
+    if signature.size == stdSize && stdSize != compactSize then verifyStandard(vk, period, message, signature, depth)
     else if signature.size == compactSize && stdSize != compactSize then
       verifyCompact(vk, period, message, signature, depth)
     else if signature.size == stdSize then
       // Sizes are equal (e.g. depth 1) — try both
       verifyStandard(vk, period, message, signature, depth) ||
-        verifyCompact(vk, period, message, signature, depth)
+      verifyCompact(vk, period, message, signature, depth)
     else false
 
   /**
@@ -98,60 +99,64 @@ object SumKES:
       signature: ByteVector,
       depth: Int
   ): Boolean =
-    // Parse the recursive structure bottom-up.
-    // The innermost (level 0) is just Ed25519 sig (64 bytes).
-    // Each outer level adds (leftVK, rightVK) = 64 bytes.
+    // Standard SumKES signature layout (recursive, inner-first):
+    //   [Ed25519_sig(64)] [vk_0_1(32), vk_1_1(32)] ... [vk_0_d(32), vk_1_d(32)]
     //
-    // Layout (reading from the end):
-    //   [ed25519_sig(64)] [vk_left_1(32), vk_right_1(32)] ... [vk_left_d(32), vk_right_d(32)]
+    // Matches the Haskell SumKES scheme (cardano-crypto-class):
+    //   SigSumKES sigma vk_0 vk_1
+    //   where sigma = SigSumKES of inner level (or Ed25519 sig at depth 0)
+    //
+    // At each level i (0-indexed from inner), vk_0 and vk_1 are constant (never
+    // swapped by updateKES). vk_0 covers the first half of periods at that level
+    // and vk_1 covers the second half. The parent hash is hash(vk_0 ++ vk_1).
+    //
+    // The verify function at each level checks:
+    //   hash(vk_0 ++ vk_1) == parentVK
+    //   if t < halfPeriods: recurse into vk_0 with period t
+    //   else: recurse into vk_1 with period (t - halfPeriods)
+    //
+    // We implement this top-down (recursive) to match the Haskell semantics exactly.
     val ed25519Sig = signature.take(64)
 
-    // Extract VK pairs at each level (1 to depth), stored after the Ed25519 sig
-    // Level i (1-indexed): offset = 64 + (i-1)*64, left = offset..offset+32, right = offset+32..offset+64
+    // Extract VK pairs at each level (innermost first in the wire format)
     val vkPairs = (0 until depth).map { i =>
       val offset = 64 + i.toLong * 64
-      val left   = signature.slice(offset, offset + 32)
-      val right  = signature.slice(offset + 32, offset + 64)
-      (left, right)
+      val vk0    = signature.slice(offset, offset + 32)
+      val vk1    = signature.slice(offset + 32, offset + 64)
+      (vk0, vk1)
     }
 
-    // At each level, determine which VK is the current subtree and which is the companion
-    // based on the period bit. Bit 0 is the innermost (leaf) level.
-    // bit=0 → left side active → leafVK is left, companion is right
-    // bit=1 → right side active → leafVK is right, companion is left
-    val (leafVk, companions) = {
-      val comps = new Array[ByteVector](depth)
-      var currentLeaf: ByteVector = null
-      for i <- 0 until depth do
-        val (left, right) = vkPairs(i)
-        val bit           = (period >> i) & 1
-        if i == 0 then
-          // Level 0: one of these is the leaf Ed25519 VK
-          if bit == 0 then { currentLeaf = left; comps(i) = right }
-          else { currentLeaf = right; comps(i) = left }
-        else
-          val bit = (period >> i) & 1
-          if bit == 0 then comps(i) = right
-          else comps(i) = left
-      (currentLeaf, comps.toIndexedSeq)
-    }
+    // Top-down recursive verification, matching the Haskell verifyKES:
+    // At the outermost level (vkPairs[depth-1]), check hash(vk_0 ++ vk_1) == root_vk,
+    // then recurse inward. At each level, determine which subtree to follow based on
+    // whether the period (relative to this level) falls in the first or second half.
+    verifyStandardRecursive(vk, period, message, ed25519Sig, vkPairs, depth - 1)
 
-    if leafVk == null then return false
+  /** Recursive top-down verification matching Haskell SumKES.verifyKES. */
+  private def verifyStandardRecursive(
+      parentVk: ByteVector,
+      period: Int,
+      message: ByteVector,
+      ed25519Sig: ByteVector,
+      vkPairs: IndexedSeq[(ByteVector, ByteVector)],
+      level: Int // index into vkPairs, from depth-1 (outermost) down to 0 (innermost)
+  ): Boolean =
+    val (vk0, vk1) = vkPairs(level)
 
-    // 1. Verify Ed25519 signature at the leaf
-    if !verifyEd25519(leafVk, message, ed25519Sig) then return false
-
-    // 2. Walk the tree from leaf to root
-    var currentHash = leafVk
-    for i <- 0 until depth do
-      val bit       = (period >> i) & 1
-      val companion = companions(i)
-      currentHash =
-        if bit == 0 then blake2b256(currentHash ++ companion)
-        else blake2b256(companion ++ currentHash)
-
-    // 3. Final hash must match the root VK
-    currentHash == vk
+    // Check: hash(vk_0 ++ vk_1) must equal the parent VK
+    if blake2b256(vk0 ++ vk1) != parentVk then false
+    else if level == 0 then
+      // Base case: Ed25519 leaf level
+      // _T = totalPeriods of inner scheme = 1 (Ed25519 has 1 period)
+      // period must be 0 or 1 at this level
+      val leafVk = if period < 1 then vk0 else vk1
+      verifyEd25519(leafVk, message, ed25519Sig)
+    else
+      // Recursive case: determine which subtree to follow
+      // _T = totalPeriods of inner scheme = 2^level (each inner level has 2^level periods)
+      val halfPeriods = 1 << level
+      if period < halfPeriods then verifyStandardRecursive(vk0, period, message, ed25519Sig, vkPairs, level - 1)
+      else verifyStandardRecursive(vk1, period - halfPeriods, message, ed25519Sig, vkPairs, level - 1)
 
   /**
    * Verify a CompactSumKES signature.

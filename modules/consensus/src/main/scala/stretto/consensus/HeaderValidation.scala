@@ -158,7 +158,14 @@ object HeaderValidation:
     val relativePeriod = (currentPeriod - header.ocert.startKesPeriod).toInt
     val step2 =
       if header.ocert.startKesPeriod <= currentPeriod && relativePeriod < params.maxKesEvolutions then Nil
-      else List(HeaderValidationError.KesPeriodOutOfRange(relativePeriod, header.ocert.startKesPeriod, params.maxKesEvolutions))
+      else
+        List(
+          HeaderValidationError.KesPeriodOutOfRange(
+            relativePeriod,
+            header.ocert.startKesPeriod,
+            params.maxKesEvolutions
+          )
+        )
 
     // 3. Verify OCert: Ed25519 signature by cold key over (hotVkey || counter || startKesPeriod)
     val ocertMsg = header.ocert.hotVkey ++
@@ -171,11 +178,11 @@ object HeaderValidation:
     // 4. Verify KES signature over raw header body
     val step4 =
       if SumKES.verify(
-           vk = header.ocert.hotVkey,
-           period = relativePeriod,
-           message = header.rawHeaderBody,
-           signature = header.kesSignature
-         )
+          vk = header.ocert.hotVkey,
+          period = relativePeriod,
+          message = header.rawHeaderBody,
+          signature = header.kesSignature
+        )
       then Nil
       else List(HeaderValidationError.KesSignatureInvalid)
 
@@ -200,11 +207,11 @@ object HeaderValidation:
           case Some(vrfOutput) =>
             val certNat = VrfInput.certNatFromOutput(vrfOutput)
             if LeaderCheck.isLeader(
-                 certNat,
-                 BigInt(pool.relativeStakeNum),
-                 BigInt(pool.relativeStakeDen),
-                 params.activeSlotCoeff
-               )
+                certNat,
+                BigInt(pool.relativeStakeNum),
+                BigInt(pool.relativeStakeDen),
+                params.activeSlotCoeff
+              )
             then Nil
             else List(HeaderValidationError.LeaderCheckFailed)
           case None => Nil // skip if VRF verification failed
