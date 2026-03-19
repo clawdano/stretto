@@ -3,7 +3,7 @@ package stretto.storage
 import cats.effect.{IO, Resource}
 import org.rocksdb.*
 import scodec.bits.ByteVector
-import stretto.core.{Point, Tip}
+import stretto.core.{OutputValue, Point, Tip, TxInput, TxOutput}
 import stretto.core.Types.*
 
 import java.nio.file.{Files, Path}
@@ -25,7 +25,9 @@ final class RocksDbStore private (
     cfMeta: ColumnFamilyHandle,
     cfByHeight: ColumnFamilyHandle,
     cfBlocks: ColumnFamilyHandle,
-    cfPointToHeight: ColumnFamilyHandle
+    cfPointToHeight: ColumnFamilyHandle,
+    cfUtxos: ColumnFamilyHandle,
+    cfLedgerMeta: ColumnFamilyHandle
 ) extends ChainStore:
 
   // ---------------------------------------------------------------------------
@@ -212,6 +214,8 @@ final class RocksDbStore private (
     cfByHeight.close()
     cfBlocks.close()
     cfPointToHeight.close()
+    cfUtxos.close()
+    cfLedgerMeta.close()
     db.close()
 
   /** Get the point stored at a given block height, if any. */
@@ -274,12 +278,183 @@ final class RocksDbStore private (
       finally it.close()
     }
 
+  // ---------------------------------------------------------------------------
+  // UTxO storage: TxInput (txId 32 bytes + index 8 bytes = 40 bytes) → TxOutput CBOR
+  // ---------------------------------------------------------------------------
+
+  private def utxoKey(txId: TxHash, index: Long): Array[Byte] =
+    val buf = new Array[Byte](40)
+    System.arraycopy(txId.txHashToHash32.hash32Bytes.toArray, 0, buf, 0, 32)
+    buf(32) = (index >>> 56).toByte
+    buf(33) = (index >>> 48).toByte
+    buf(34) = (index >>> 40).toByte
+    buf(35) = (index >>> 32).toByte
+    buf(36) = (index >>> 24).toByte
+    buf(37) = (index >>> 16).toByte
+    buf(38) = (index >>> 8).toByte
+    buf(39) = index.toByte
+    buf
+
+  private def utxoKey(input: TxInput): Array[Byte] =
+    utxoKey(input.txId, input.index)
+
+  /** Encode a TxOutput as: address_len (4 bytes) + address + value_tag (1 byte) + coin (8 bytes) [+ assets_raw] */
+  private def encodeTxOutput(output: TxOutput): Array[Byte] =
+    val addrBytes = output.address.toArray
+    val addrLen   = addrBytes.length
+    output.value match
+      case OutputValue.PureAda(coin) =>
+        val buf = new Array[Byte](4 + addrLen + 1 + 8)
+        buf(0) = (addrLen >>> 24).toByte
+        buf(1) = (addrLen >>> 16).toByte
+        buf(2) = (addrLen >>> 8).toByte
+        buf(3) = addrLen.toByte
+        System.arraycopy(addrBytes, 0, buf, 4, addrLen)
+        buf(4 + addrLen) = 0 // PureAda tag
+        val c = coin.lovelaceValue
+        buf(4 + addrLen + 1) = (c >>> 56).toByte
+        buf(4 + addrLen + 2) = (c >>> 48).toByte
+        buf(4 + addrLen + 3) = (c >>> 40).toByte
+        buf(4 + addrLen + 4) = (c >>> 32).toByte
+        buf(4 + addrLen + 5) = (c >>> 24).toByte
+        buf(4 + addrLen + 6) = (c >>> 16).toByte
+        buf(4 + addrLen + 7) = (c >>> 8).toByte
+        buf(4 + addrLen + 8) = c.toByte
+        buf
+      case OutputValue.MultiAsset(coin, assets) =>
+        val assetsBytes = assets.toArray
+        val buf         = new Array[Byte](4 + addrLen + 1 + 8 + assetsBytes.length)
+        buf(0) = (addrLen >>> 24).toByte
+        buf(1) = (addrLen >>> 16).toByte
+        buf(2) = (addrLen >>> 8).toByte
+        buf(3) = addrLen.toByte
+        System.arraycopy(addrBytes, 0, buf, 4, addrLen)
+        buf(4 + addrLen) = 1 // MultiAsset tag
+        val c = coin.lovelaceValue
+        buf(4 + addrLen + 1) = (c >>> 56).toByte
+        buf(4 + addrLen + 2) = (c >>> 48).toByte
+        buf(4 + addrLen + 3) = (c >>> 40).toByte
+        buf(4 + addrLen + 4) = (c >>> 32).toByte
+        buf(4 + addrLen + 5) = (c >>> 24).toByte
+        buf(4 + addrLen + 6) = (c >>> 16).toByte
+        buf(4 + addrLen + 7) = (c >>> 8).toByte
+        buf(4 + addrLen + 8) = c.toByte
+        System.arraycopy(assetsBytes, 0, buf, 4 + addrLen + 9, assetsBytes.length)
+        buf
+
+  private def decodeTxOutput(bytes: Array[Byte]): TxOutput =
+    val addrLen =
+      ((bytes(0) & 0xff) << 24) |
+        ((bytes(1) & 0xff) << 16) |
+        ((bytes(2) & 0xff) << 8) |
+        (bytes(3) & 0xff)
+    val address = ByteVector.view(bytes, 4, addrLen)
+    val tag     = bytes(4 + addrLen) & 0xff
+    val coinOffset = 4 + addrLen + 1
+    val coin = Lovelace(
+      ((bytes(coinOffset).toLong & 0xff) << 56) |
+        ((bytes(coinOffset + 1).toLong & 0xff) << 48) |
+        ((bytes(coinOffset + 2).toLong & 0xff) << 40) |
+        ((bytes(coinOffset + 3).toLong & 0xff) << 32) |
+        ((bytes(coinOffset + 4).toLong & 0xff) << 24) |
+        ((bytes(coinOffset + 5).toLong & 0xff) << 16) |
+        ((bytes(coinOffset + 6).toLong & 0xff) << 8) |
+        (bytes(coinOffset + 7).toLong & 0xff)
+    )
+    if tag == 0 then TxOutput(address, OutputValue.PureAda(coin))
+    else
+      val assetsRaw = ByteVector.view(bytes, coinOffset + 8, bytes.length - coinOffset - 8)
+      TxOutput(address, OutputValue.MultiAsset(coin, assetsRaw))
+
+  /** Store a UTxO entry. */
+  def putUtxo(txId: TxHash, index: Long, output: TxOutput): IO[Unit] =
+    IO(db.put(cfUtxos, utxoKey(txId, index), encodeTxOutput(output)))
+
+  /** Retrieve a UTxO entry. */
+  def getUtxo(input: TxInput): IO[Option[TxOutput]] =
+    IO(Option(db.get(cfUtxos, utxoKey(input))).map(decodeTxOutput))
+
+  /** Delete a UTxO entry. */
+  def deleteUtxo(input: TxInput): IO[Unit] =
+    IO(db.delete(cfUtxos, utxoKey(input)))
+
+  /**
+   * Apply a UTxO delta atomically: delete consumed inputs, add produced outputs.
+   * Uses WriteBatch for atomicity.
+   */
+  def applyUtxoDelta(
+      consumed: Iterable[TxInput],
+      produced: Iterable[(TxInput, TxOutput)]
+  ): IO[Unit] =
+    IO {
+      val batch = new WriteBatch()
+      try
+        consumed.foreach(input => batch.delete(cfUtxos, utxoKey(input)))
+        produced.foreach { case (input, output) =>
+          batch.put(cfUtxos, utxoKey(input), encodeTxOutput(output))
+        }
+        db.write(new WriteOptions(), batch)
+      finally batch.close()
+    }
+
+  /** Get the last applied ledger block height. */
+  def getLedgerHeight: IO[Option[BlockNo]] =
+    IO {
+      val key = "ledger_height".getBytes("UTF-8")
+      Option(db.get(cfLedgerMeta, key)).map { bytes =>
+        val bn =
+          ((bytes(0).toLong & 0xff) << 56) |
+            ((bytes(1).toLong & 0xff) << 48) |
+            ((bytes(2).toLong & 0xff) << 40) |
+            ((bytes(3).toLong & 0xff) << 32) |
+            ((bytes(4).toLong & 0xff) << 24) |
+            ((bytes(5).toLong & 0xff) << 16) |
+            ((bytes(6).toLong & 0xff) << 8) |
+            (bytes(7).toLong & 0xff)
+        BlockNo(bn)
+      }
+    }
+
+  /** Set the last applied ledger block height. */
+  def putLedgerHeight(blockNo: BlockNo): IO[Unit] =
+    IO {
+      val key = "ledger_height".getBytes("UTF-8")
+      db.put(cfLedgerMeta, key, heightKey(blockNo))
+    }
+
+  /** Apply UTxO delta and update ledger height atomically. */
+  def applyUtxoDeltaWithHeight(
+      consumed: Iterable[TxInput],
+      produced: Iterable[(TxInput, TxOutput)],
+      blockNo: BlockNo
+  ): IO[Unit] =
+    IO {
+      val batch = new WriteBatch()
+      try
+        consumed.foreach(input => batch.delete(cfUtxos, utxoKey(input)))
+        produced.foreach { case (input, output) =>
+          batch.put(cfUtxos, utxoKey(input), encodeTxOutput(output))
+        }
+        val key = "ledger_height".getBytes("UTF-8")
+        batch.put(cfLedgerMeta, key, heightKey(blockNo))
+        db.write(new WriteOptions(), batch)
+      finally batch.close()
+    }
+
+  /** Get the count of UTxO entries (approximate, uses RocksDB estimate). */
+  def getUtxoCount: IO[Long] =
+    IO {
+      val prop = db.getProperty(cfUtxos, "rocksdb.estimate-num-keys")
+      if prop != null then prop.toLong else 0L
+    }
+
 object RocksDbStore:
 
   /** Load the RocksDB native library once. */
   RocksDB.loadLibrary()
 
-  private val cfNames = List("default", "headers", "meta", "by_height", "blocks", "point_to_height")
+  private val cfNames =
+    List("default", "headers", "meta", "by_height", "blocks", "point_to_height", "utxos", "ledger_meta")
 
   /**
    * Open a RocksDB-backed chain store as a cats-effect Resource.
@@ -312,7 +487,9 @@ object RocksDbStore:
       cfMeta = cfHandles.get(2),
       cfByHeight = cfHandles.get(3),
       cfBlocks = cfHandles.get(4),
-      cfPointToHeight = cfHandles.get(5)
+      cfPointToHeight = cfHandles.get(5),
+      cfUtxos = cfHandles.get(6),
+      cfLedgerMeta = cfHandles.get(7)
     )
   }
 

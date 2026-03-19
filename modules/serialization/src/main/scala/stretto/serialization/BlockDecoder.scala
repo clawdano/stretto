@@ -326,8 +326,8 @@ object BlockDecoder:
       (afterHeader, header) <- decodeShelleyHeader(bytes, afterBlockArr, era)
       // 2. Transaction bodies (array of CBOR maps)
       (afterBodies, txBodies) <- decodeShelleyTxBodies(bytes, afterHeader)
-      // 3. Witnesses (skip)
-      (_, afterWitnesses) <- skipItem(bytes, afterBodies)
+      // 3. Witnesses (array of witness sets — parse vkey witnesses, skip rest)
+      (afterWitnesses, witnesses) <- decodeTxWitnessSets(bytes, afterBodies)
       // 4. Auxiliary data (map of index -> aux, skip)
       (_, afterAux) <- skipItem(bytes, afterWitnesses)
       // 5. Invalid transactions (Alonzo+ only, optional)
@@ -338,10 +338,210 @@ object BlockDecoder:
       era = era,
       header = header,
       txBodies = txBodies,
-      txWitnesses = Vector.fill(txBodies.size)(ByteVector.empty), // placeholder
-      auxiliaryData = Vector.fill(txBodies.size)(None),           // placeholder
+      txWitnesses = witnesses.map(encodeWitnessSetRaw),
+      auxiliaryData = Vector.fill(txBodies.size)(None),
       invalidTxs = invalidTxs
     )
+
+  /** Encode a TxWitnessSet back to a placeholder raw ByteVector (empty for now). */
+  private def encodeWitnessSetRaw(@annotation.unused ws: TxWitnessSet): ByteVector = ByteVector.empty
+
+  // ---------------------------------------------------------------------------
+  // Witness set decoding
+  // ---------------------------------------------------------------------------
+
+  /** Decode an array of transaction witness sets. */
+  private def decodeTxWitnessSets(
+      bytes: ByteVector,
+      offset: Int
+  ): Either[String, (Int, Vector[TxWitnessSet])] =
+    readArrayHeader(bytes, offset).flatMap { case (count, afterArr) =>
+      if count == IndefiniteLength then
+        readItemsUntilBreak(bytes, afterArr) { (p, acc: Vector[TxWitnessSet]) =>
+          decodeWitnessSet(bytes, p).map { case (ws, next) => (acc :+ ws, next) }
+        }(Vector.empty).map(_.swap)
+      else
+        (0 until count.toInt).foldLeft(
+          Right((afterArr, Vector.empty[TxWitnessSet])): Either[String, (Int, Vector[TxWitnessSet])]
+        ) {
+          case (Left(err), _) => Left(err)
+          case (Right((pos, acc)), _) =>
+            decodeWitnessSet(bytes, pos).map { case (ws, next) => (next, acc :+ ws) }
+        }
+    }
+
+  /**
+   * Decode a single witness set (CBOR map with numeric keys).
+   * Parses vkey witnesses (key 0) fully, captures other keys as raw CBOR.
+   */
+  def decodeWitnessSet(bytes: ByteVector, offset: Int): Either[String, (TxWitnessSet, Int)] =
+    readMapHeader(bytes, offset).flatMap { case (mapLen, afterMap) =>
+      parseWitnessMapEntries(bytes, afterMap, mapLen)
+    }
+
+  /** Parse witness map entries iteratively without non-local returns. */
+  private def parseWitnessMapEntries(
+      bytes: ByteVector,
+      offset: Int,
+      mapLen: Long
+  ): Either[String, (TxWitnessSet, Int)] =
+    var pos              = offset
+    var vkeys            = Vector.empty[VkeyWitness]
+    var bootstrapWit: Option[ByteVector]  = None
+    var nativeScripts: Option[ByteVector] = None
+    var plutusV1: Option[ByteVector]      = None
+    var plutusData: Option[ByteVector]    = None
+    var redeemers: Option[ByteVector]     = None
+    var plutusV2: Option[ByteVector]      = None
+    var plutusV3: Option[ByteVector]      = None
+    var error: Option[String]             = None
+
+    def parseEntry(): Unit =
+      if error.isDefined then ()
+      else
+        readUInt(bytes, pos) match
+          case Left(err) => error = Some(err)
+          case Right((key, afterKey)) =>
+            key.toInt match
+              case 0 => // vkey witnesses
+                decodeVkeyWitnessArray(bytes, afterKey) match
+                  case Left(err) => error = Some(err)
+                  case Right((vks, next)) => vkeys = vks; pos = next
+              case 1 => // native scripts
+                extractRawBytes(bytes, afterKey) match
+                  case Left(err) => error = Some(err)
+                  case Right((raw, next)) => nativeScripts = Some(raw); pos = next
+              case 2 => // bootstrap witnesses
+                extractRawBytes(bytes, afterKey) match
+                  case Left(err) => error = Some(err)
+                  case Right((raw, next)) => bootstrapWit = Some(raw); pos = next
+              case 3 => // plutus v1 scripts
+                extractRawBytes(bytes, afterKey) match
+                  case Left(err) => error = Some(err)
+                  case Right((raw, next)) => plutusV1 = Some(raw); pos = next
+              case 4 => // plutus data (datums)
+                extractRawBytes(bytes, afterKey) match
+                  case Left(err) => error = Some(err)
+                  case Right((raw, next)) => plutusData = Some(raw); pos = next
+              case 5 => // redeemers
+                extractRawBytes(bytes, afterKey) match
+                  case Left(err) => error = Some(err)
+                  case Right((raw, next)) => redeemers = Some(raw); pos = next
+              case 6 => // plutus v2 scripts
+                extractRawBytes(bytes, afterKey) match
+                  case Left(err) => error = Some(err)
+                  case Right((raw, next)) => plutusV2 = Some(raw); pos = next
+              case 7 => // plutus v3 scripts
+                extractRawBytes(bytes, afterKey) match
+                  case Left(err) => error = Some(err)
+                  case Right((raw, next)) => plutusV3 = Some(raw); pos = next
+              case _ =>
+                skipItem(bytes, afterKey) match
+                  case Left(err) => error = Some(err)
+                  case Right((_, next)) => pos = next
+
+    if mapLen == IndefiniteLength then
+      while error.isEmpty && pos < bytes.size && (bytes(pos.toLong) & 0xff) != BreakByte do
+        parseEntry()
+      if error.isEmpty then pos += 1
+    else
+      var i = 0
+      while error.isEmpty && i < mapLen.toInt do
+        parseEntry()
+        i += 1
+
+    error match
+      case Some(err) => Left(err)
+      case None =>
+        Right((TxWitnessSet(vkeys, bootstrapWit, nativeScripts, plutusV1, plutusV2, plutusV3, plutusData, redeemers), pos))
+
+  /** Decode an array of VkeyWitnesses. */
+  private def decodeVkeyWitnessArray(bytes: ByteVector, offset: Int): Either[String, (Vector[VkeyWitness], Int)] =
+    readArrayHeader(bytes, offset).flatMap { case (count, afterArr) =>
+      if count == IndefiniteLength then
+        readItemsUntilBreak(bytes, afterArr) { (p, acc: Vector[VkeyWitness]) =>
+          decodeVkeyWitness(bytes, p).map { case (vk, next) => (acc :+ vk, next) }
+        }(Vector.empty)
+      else
+        (0 until count.toInt).foldLeft(
+          Right((Vector.empty[VkeyWitness], afterArr)): Either[String, (Vector[VkeyWitness], Int)]
+        ) {
+          case (Left(err), _) => Left(err)
+          case (Right((acc, p)), _) =>
+            decodeVkeyWitness(bytes, p).map { case (vk, next) => (acc :+ vk, next) }
+        }
+    }
+
+  /** Decode a single vkey witness: [vkey, signature] */
+  private def decodeVkeyWitness(bytes: ByteVector, offset: Int): Either[String, (VkeyWitness, Int)] =
+    for
+      (arrLen, afterArr)   <- readArrayHeader(bytes, offset)
+      (vkey, afterVkey)    <- readByteString(bytes, afterArr)
+      (sig, afterSig)      <- readByteString(bytes, afterVkey)
+      afterEnd             <- if arrLen == IndefiniteLength then consumeBreak(bytes, afterSig) else Right(afterSig)
+    yield (VkeyWitness(vkey, sig), afterEnd)
+
+  // ---------------------------------------------------------------------------
+  // Standalone transaction decoder (for N2C LocalTxSubmission)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Decode a standalone transaction from raw CBOR.
+   *
+   * Conway wire format: [body, witnesses, isValid, auxiliaryData]
+   * Where body and witnesses are inline CBOR (not tag24-wrapped).
+   *
+   * @param bytes raw transaction CBOR
+   * @return decoded Transaction or error
+   */
+  def decodeTx(bytes: ByteVector): Either[String, Transaction] =
+    for
+      (arrLen, afterArr) <- readArrayHeader(bytes, 0)
+      _                  <- require(arrLen == 4 || arrLen == IndefiniteLength, s"expected 4-element tx, got $arrLen")
+      // 1. Transaction body
+      (afterBody, txBody) <- decodeShelleyTxBody(bytes, afterArr)
+      // 2. Witness set
+      (witnesses, afterWit) <- decodeWitnessSet(bytes, afterBody)
+      // 3. isValid (bool or uint 0/1)
+      (isValid, afterValid) <- readIsValid(bytes, afterWit)
+      // 4. Auxiliary data (skip, capture raw or null)
+      (auxRaw, afterAux) <- extractOptionalRaw(bytes, afterValid)
+      afterEnd <- if arrLen == IndefiniteLength then consumeBreak(bytes, afterAux) else Right(afterAux)
+    yield Transaction(
+      body = txBody,
+      witnesses = witnesses,
+      isValid = isValid,
+      auxiliaryData = auxRaw,
+      rawTx = bytes
+    )
+
+  /** Decode a standalone transaction from hex CBOR. */
+  def decodeTxHex(hex: String): Either[String, Transaction] =
+    ByteVector.fromHex(hex) match
+      case Some(bytes) => decodeTx(bytes)
+      case None        => Left("Invalid hex string")
+
+  /** Read isValid field — can be CBOR bool (simple value) or uint 0/1. */
+  private def readIsValid(bytes: ByteVector, offset: Int): Either[String, (Boolean, Int)] =
+    if offset >= bytes.size then Left("unexpected end reading isValid")
+    else
+      val b     = bytes(offset.toLong) & 0xff
+      val major = b >> 5
+      if major == 7 then // simple value (bool)
+        val ai = b & 0x1f
+        if ai == 20 then Right((false, offset + 1))       // false
+        else if ai == 21 then Right((true, offset + 1))   // true
+        else Right((true, offset + 1))                     // other simple → true
+      else // uint
+        readUInt(bytes, offset).map { case (v, next) => (v != 0, next) }
+
+  /** Extract optional raw CBOR — None if CBOR null, Some(raw) otherwise. */
+  private def extractOptionalRaw(bytes: ByteVector, offset: Int): Either[String, (Option[ByteVector], Int)] =
+    if offset >= bytes.size then Right((None, offset))
+    else
+      val b = bytes(offset.toLong) & 0xff
+      if b == 0xf6 then Right((None, offset + 1)) // CBOR null
+      else extractRawBytes(bytes, offset).map { case (raw, next) => (Some(raw), next) }
 
   private def readInvalidTxs(bytes: ByteVector, offset: Int): Either[String, Vector[Int]] =
     // The invalid txs field may be absent at end of data or may be a break byte for indefinite block
@@ -507,6 +707,22 @@ object BlockDecoder:
           }
     yield result
 
+  /** Intermediate state for tx body map parsing. */
+  private final class TxBodyState:
+    var inputs: Vector[TxInput]              = Vector.empty
+    var outputs: Vector[TxOutput]            = Vector.empty
+    var fee: Lovelace                        = Lovelace(0L)
+    var ttl: Option[SlotNo]                  = None
+    var validityIntervalStart: Option[SlotNo] = None
+    var mint: Option[ByteVector]              = None
+    var scriptDataHash: Option[Hash32]        = None
+    var collateralInputs: Vector[TxInput]     = Vector.empty
+    var requiredSigners: Vector[Hash28]       = Vector.empty
+    var networkId: Option[Int]                = None
+    var collateralReturn: Option[TxOutput]    = None
+    var totalCollateral: Option[Lovelace]     = None
+    var referenceInputs: Vector[TxInput]      = Vector.empty
+
   private def decodeShelleyTxBody(bytes: ByteVector, offset: Int): Either[String, (Int, TransactionBody)] =
     // tx_body is a CBOR map: {0: inputs, 1: outputs, 2: fee, 3: ttl?, ...}
     // Capture the raw CBOR for hashing, then parse key fields
@@ -514,15 +730,24 @@ object BlockDecoder:
     for
       (mapLen, afterMapHdr) <- readMapHeader(bytes, offset)
       parseResult           <- parseTxBodyMap(bytes, afterMapHdr, mapLen)
-      (afterMap, inputs, outputs, fee, ttl) = parseResult
-      rawCbor                               = bytes.slice(rawStart.toLong, afterMap.toLong)
+      (afterMap, st) = parseResult
+      rawCbor        = bytes.slice(rawStart.toLong, afterMap.toLong)
     yield (
       afterMap,
       TransactionBody(
-        inputs = inputs,
-        outputs = outputs,
-        fee = fee,
-        ttl = ttl,
+        inputs = st.inputs,
+        outputs = st.outputs,
+        fee = st.fee,
+        ttl = st.ttl,
+        validityIntervalStart = st.validityIntervalStart,
+        mint = st.mint,
+        scriptDataHash = st.scriptDataHash,
+        collateralInputs = st.collateralInputs,
+        requiredSigners = st.requiredSigners,
+        networkId = st.networkId,
+        collateralReturn = st.collateralReturn,
+        totalCollateral = st.totalCollateral,
+        referenceInputs = st.referenceInputs,
         rawCbor = rawCbor
       )
     )
@@ -531,113 +756,161 @@ object BlockDecoder:
       bytes: ByteVector,
       offset: Int,
       mapLen: Long
-  ): Either[String, (Int, Vector[TxInput], Vector[TxOutput], Lovelace, Option[SlotNo])] =
-    var pos                 = offset
-    var inputs              = Vector.empty[TxInput]
-    var outputs             = Vector.empty[TxOutput]
-    var fee                 = Lovelace(0L)
-    var ttl: Option[SlotNo] = None
+  ): Either[String, (Int, TxBodyState)] =
+    var pos              = offset
+    val st               = new TxBodyState
+    var error: Option[String] = None
 
     if mapLen == IndefiniteLength then
-      // Indefinite-length map: read key-value pairs until break byte
-      while
-        if pos >= bytes.size then return Left("unexpected end of input in indefinite map")
-        val b = bytes(pos.toLong) & 0xff
-        b != BreakByte
-      do
-        parseTxBodyMapEntry(bytes, pos, inputs, outputs, fee, ttl) match
-          case Left(err) => return Left(err)
-          case Right((newPos, newInputs, newOutputs, newFee, newTtl)) =>
-            pos = newPos
-            inputs = newInputs
-            outputs = newOutputs
-            fee = newFee
-            ttl = newTtl
-      // Skip the break byte
-      pos += 1
+      while error.isEmpty && pos < bytes.size && (bytes(pos.toLong) & 0xff) != BreakByte do
+        parseTxBodyMapEntry(bytes, pos, st) match
+          case Left(err)     => error = Some(err)
+          case Right(newPos) => pos = newPos
+      if error.isEmpty then
+        if pos >= bytes.size then error = Some("unexpected end of input in indefinite map")
+        else pos += 1
     else
       var i = 0
-      while i < mapLen.toInt do
-        parseTxBodyMapEntry(bytes, pos, inputs, outputs, fee, ttl) match
-          case Left(err) => return Left(err)
-          case Right((newPos, newInputs, newOutputs, newFee, newTtl)) =>
-            pos = newPos
-            inputs = newInputs
-            outputs = newOutputs
-            fee = newFee
-            ttl = newTtl
+      while error.isEmpty && i < mapLen.toInt do
+        parseTxBodyMapEntry(bytes, pos, st) match
+          case Left(err)     => error = Some(err)
+          case Right(newPos) => pos = newPos
         i += 1
 
-    Right((pos, inputs, outputs, fee, ttl))
+    error match
+      case Some(err) => Left(err)
+      case None      => Right((pos, st))
 
   private def parseTxBodyMapEntry(
       bytes: ByteVector,
       pos: Int,
-      inputs: Vector[TxInput],
-      outputs: Vector[TxOutput],
-      fee: Lovelace,
-      ttl: Option[SlotNo]
-  ): Either[String, (Int, Vector[TxInput], Vector[TxOutput], Lovelace, Option[SlotNo])] =
+      st: TxBodyState
+  ): Either[String, Int] =
     readUInt(bytes, pos) match
       case Left(err) => Left(err)
       case Right((key, afterKey)) =>
         key.toInt match
           case 0 => // inputs = set of [txId, index]
-            readArrayHeader(bytes, afterKey) match
-              case Left(err) => Left(err)
-              case Right((count, afterArr)) =>
-                if count == IndefiniteLength then
-                  readItemsUntilBreak(bytes, afterArr) { (p, acc: Vector[TxInput]) =>
-                    decodeTxInput(bytes, p).map { case (inp, next) => (acc :+ inp, next) }
-                  }(inputs).map { case (newInputs, nextPos) =>
-                    (nextPos, newInputs, outputs, fee, ttl)
-                  }
-                else
-                  var j         = 0
-                  var p         = afterArr
-                  var newInputs = inputs
-                  while j < count.toInt do
-                    decodeTxInput(bytes, p) match
-                      case Left(err) => return Left(err)
-                      case Right((inp, next)) =>
-                        newInputs = newInputs :+ inp
-                        p = next
-                    j += 1
-                  Right((p, newInputs, outputs, fee, ttl))
+            decodeInputArray(bytes, afterKey).map { case (newInputs, next) =>
+              st.inputs = newInputs
+              next
+            }
           case 1 => // outputs = [output, ...]
-            readArrayHeader(bytes, afterKey) match
-              case Left(err) => Left(err)
-              case Right((count, afterArr)) =>
-                if count == IndefiniteLength then
-                  readItemsUntilBreak(bytes, afterArr) { (p, acc: Vector[TxOutput]) =>
-                    decodeTxOutput(bytes, p).map { case (out, next) => (acc :+ out, next) }
-                  }(outputs).map { case (newOutputs, nextPos) =>
-                    (nextPos, inputs, newOutputs, fee, ttl)
-                  }
-                else
-                  var j          = 0
-                  var p          = afterArr
-                  var newOutputs = outputs
-                  while j < count.toInt do
-                    decodeTxOutput(bytes, p) match
-                      case Left(err) => return Left(err)
-                      case Right((out, next)) =>
-                        newOutputs = newOutputs :+ out
-                        p = next
-                    j += 1
-                  Right((p, inputs, newOutputs, fee, ttl))
+            decodeOutputArray(bytes, afterKey).map { case (newOutputs, next) =>
+              st.outputs = newOutputs
+              next
+            }
           case 2 => // fee
-            readUInt(bytes, afterKey) match
-              case Left(err)        => Left(err)
-              case Right((f, next)) => Right((next, inputs, outputs, Lovelace(f), ttl))
+            readUInt(bytes, afterKey).map { case (f, next) =>
+              st.fee = Lovelace(f)
+              next
+            }
           case 3 => // ttl
-            readUInt(bytes, afterKey) match
-              case Left(err)        => Left(err)
-              case Right((t, next)) => Right((next, inputs, outputs, fee, Some(SlotNo(t))))
-          case _ => // skip unknown keys
-            skipItem(bytes, afterKey) match
-              case Left(err)        => Left(err)
-              case Right((_, next)) => Right((next, inputs, outputs, fee, ttl))
+            readUInt(bytes, afterKey).map { case (t, next) =>
+              st.ttl = Some(SlotNo(t))
+              next
+            }
+          case 8 => // validity_interval_start (Allegra+)
+            readUInt(bytes, afterKey).map { case (s, next) =>
+              st.validityIntervalStart = Some(SlotNo(s))
+              next
+            }
+          case 9 => // mint (Mary+) — capture raw CBOR
+            extractRawBytes(bytes, afterKey).map { case (raw, next) =>
+              st.mint = Some(raw)
+              next
+            }
+          case 11 => // script_data_hash (Alonzo+)
+            readHash32(bytes, afterKey).map { case (h, next) =>
+              st.scriptDataHash = Some(h)
+              next
+            }
+          case 13 => // collateral inputs (Alonzo+)
+            decodeInputArray(bytes, afterKey).map { case (inputs, next) =>
+              st.collateralInputs = inputs
+              next
+            }
+          case 14 => // required_signers (Alonzo+) — array of key hashes (28 bytes)
+            readArrayHeader(bytes, afterKey).flatMap { case (count, afterArr) =>
+              if count == IndefiniteLength then
+                readItemsUntilBreak(bytes, afterArr) { (p, acc: Vector[Hash28]) =>
+                  readByteString(bytes, p).map { case (bs, next) =>
+                    (acc :+ Hash28.unsafeFrom(bs), next)
+                  }
+                }(Vector.empty).map { case (signers, next) =>
+                  st.requiredSigners = signers
+                  next
+                }
+              else
+                (0 until count.toInt).foldLeft(
+                  Right((Vector.empty[Hash28], afterArr)): Either[String, (Vector[Hash28], Int)]
+                ) {
+                  case (Left(err), _) => Left(err)
+                  case (Right((acc, p)), _) =>
+                    readByteString(bytes, p).map { case (bs, next) =>
+                      (acc :+ Hash28.unsafeFrom(bs), next)
+                    }
+                }.map { case (signers, next) =>
+                  st.requiredSigners = signers
+                  next
+                }
+            }
+          case 15 => // network_id (Alonzo+)
+            readUInt(bytes, afterKey).map { case (n, next) =>
+              st.networkId = Some(n.toInt)
+              next
+            }
+          case 16 => // collateral_return (Babbage+)
+            decodeTxOutput(bytes, afterKey).map { case (out, next) =>
+              st.collateralReturn = Some(out)
+              next
+            }
+          case 17 => // total_collateral (Babbage+)
+            readUInt(bytes, afterKey).map { case (c, next) =>
+              st.totalCollateral = Some(Lovelace(c))
+              next
+            }
+          case 18 => // reference_inputs (Babbage+)
+            decodeInputArray(bytes, afterKey).map { case (inputs, next) =>
+              st.referenceInputs = inputs
+              next
+            }
+          case _ => // skip unknown keys (certs, withdrawals, update, etc.)
+            skipItem(bytes, afterKey).map { case (_, next) => next }
+
+  /** Decode an array of TxInputs (used for inputs, collateral, reference inputs). */
+  private def decodeInputArray(bytes: ByteVector, offset: Int): Either[String, (Vector[TxInput], Int)] =
+    readArrayHeader(bytes, offset).flatMap { case (count, afterArr) =>
+      if count == IndefiniteLength then
+        readItemsUntilBreak(bytes, afterArr) { (p, acc: Vector[TxInput]) =>
+          decodeTxInput(bytes, p).map { case (inp, next) => (acc :+ inp, next) }
+        }(Vector.empty)
+      else
+        (0 until count.toInt).foldLeft(
+          Right((Vector.empty[TxInput], afterArr)): Either[String, (Vector[TxInput], Int)]
+        ) {
+          case (Left(err), _) => Left(err)
+          case (Right((acc, p)), _) =>
+            decodeTxInput(bytes, p).map { case (inp, next) => (acc :+ inp, next) }
+        }
+    }
+
+  /** Decode an array of TxOutputs. */
+  private def decodeOutputArray(bytes: ByteVector, offset: Int): Either[String, (Vector[TxOutput], Int)] =
+    readArrayHeader(bytes, offset).flatMap { case (count, afterArr) =>
+      if count == IndefiniteLength then
+        readItemsUntilBreak(bytes, afterArr) { (p, acc: Vector[TxOutput]) =>
+          decodeTxOutput(bytes, p).map { case (out, next) => (acc :+ out, next) }
+        }(Vector.empty)
+      else
+        (0 until count.toInt).foldLeft(
+          Right((Vector.empty[TxOutput], afterArr)): Either[String, (Vector[TxOutput], Int)]
+        ) {
+          case (Left(err), _) => Left(err)
+          case (Right((acc, p)), _) =>
+            decodeTxOutput(bytes, p).map { case (out, next) => (acc :+ out, next) }
+        }
+    }
 
   private def decodeTxInput(bytes: ByteVector, offset: Int): Either[String, (TxInput, Int)] =
     for

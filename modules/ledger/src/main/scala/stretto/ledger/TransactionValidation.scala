@@ -64,6 +64,25 @@ object TransactionValidation:
         input: TxInput
     )
 
+    /** Witness verification failed — missing or invalid signature. */
+    case WitnessVerificationFailed(
+        txHash: TxHash,
+        detail: String
+    )
+
+    /** A required signer key hash is not covered by any witness. */
+    case RequiredSignerMissing(
+        txHash: TxHash,
+        keyHash: Hash28
+    )
+
+    /** Validity interval start not yet reached. Allegra+ */
+    case ValidityIntervalStartNotReached(
+        txHash: TxHash,
+        validFrom: SlotNo,
+        currentSlot: SlotNo
+    )
+
   /**
    * Validate a Shelley+ transaction against the UTxO state and protocol parameters.
    *
@@ -114,6 +133,12 @@ object TransactionValidation:
     // 4. TTL: currentSlot < ttl (Shelley spec §8.1)
     tx.ttl.foreach { ttl =>
       if currentSlot.value >= ttl.value then errors = errors :+ ValidationError.ExpiredTx(txHash, ttl, currentSlot)
+    }
+
+    // 4b. Validity interval start: currentSlot >= validFrom (Allegra+)
+    tx.validityIntervalStart.foreach { validFrom =>
+      if currentSlot.value < validFrom.value then
+        errors = errors :+ ValidationError.ValidityIntervalStartNotReached(txHash, validFrom, currentSlot)
     }
 
     // 5. Minimum UTxO: each output >= minLovelace (Shelley spec §9.2)
@@ -175,3 +200,33 @@ object TransactionValidation:
       )
 
     errors
+
+  /**
+   * Full transaction validation including witness verification.
+   *
+   * Combines UTxO validation with Ed25519 witness checks.
+   * Used for LocalTxSubmission.
+   */
+  def validateFullTx(
+      tx: TransactionBody,
+      witnesses: Vector[VkeyWitness],
+      txHash: TxHash,
+      utxos: Map[TxInput, TxOutput],
+      params: ProtocolParameters,
+      currentSlot: SlotNo
+  ): Vector[ValidationError] =
+    // Run standard UTxO validation
+    val utxoErrors = validateShelleyTx(tx, txHash, utxos, params, currentSlot)
+
+    // Run witness verification
+    val witnessErrors = WitnessValidator.verify(tx, witnesses, utxos, txHash)
+    val mappedWitnessErrors = witnessErrors.map {
+      case WitnessValidator.WitnessError.MissingWitness(h, keyHash) =>
+        ValidationError.WitnessVerificationFailed(h, s"missing witness for key hash ${keyHash.hash28Hex}")
+      case WitnessValidator.WitnessError.InvalidSignature(h, vkey) =>
+        ValidationError.WitnessVerificationFailed(h, s"invalid signature for vkey ${vkey.toHex.take(16)}...")
+      case WitnessValidator.WitnessError.RequiredSignerMissing(h, keyHash) =>
+        ValidationError.RequiredSignerMissing(h, keyHash)
+    }
+
+    utxoErrors ++ mappedWitnessErrors

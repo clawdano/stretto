@@ -11,7 +11,7 @@ import stretto.core.Types.*
  *
  * Mirrors the HeaderSyncer pattern but stores block data alongside headers.
  */
-final class BlockSyncer(store: RocksDbStore):
+final class BlockSyncer(val store: RocksDbStore):
 
   /**
    * Persist a batch of headers + blocks atomically.

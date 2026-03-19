@@ -161,6 +161,15 @@ class BlockApplicatorSpec extends FunSuite:
           outputs = Vector(TxOutput(ByteVector.fromValidHex("01"), OutputValue.PureAda(Lovelace(800000L)))),
           fee = Lovelace(200000L),
           ttl = None,
+          validityIntervalStart = None,
+          mint = None,
+          scriptDataHash = None,
+          collateralInputs = Vector.empty,
+          requiredSigners = Vector.empty,
+          networkId = None,
+          collateralReturn = None,
+          totalCollateral = None,
+          referenceInputs = Vector.empty,
           rawCbor = ByteVector.fromValidHex(
             "a400818258200101010101010101010101010101010101010101010101010101010101010101000181a200581d01018201581a000c35000282a"
           )

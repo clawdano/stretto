@@ -109,7 +109,8 @@ object BlockSyncPipeline:
       progressInterval: Int = 500,
       pipelineWindow: Int = 100,
       batchSize: Int = 50,
-      headerValidator: Option[PermissiveHeaderValidator] = None
+      headerValidator: Option[PermissiveHeaderValidator] = None,
+      ledgerState: Option[LedgerState] = None
   ): IO[SyncProgress] =
     val syncer = new BlockSyncer(store)
     MuxConnection.connectWithTimeout(host, port, networkMagic).use { conn =>
@@ -130,7 +131,8 @@ object BlockSyncPipeline:
           progressInterval,
           pipelineWindow,
           batchSize,
-          headerValidator
+          headerValidator,
+          ledgerState
         )
         _ <- blockFetchClient.done
       yield result
@@ -147,7 +149,8 @@ object BlockSyncPipeline:
       progressInterval: Int,
       pipelineWindow: Int,
       batchSize: Int,
-      headerValidator: Option[PermissiveHeaderValidator]
+      headerValidator: Option[PermissiveHeaderValidator],
+      ledgerState: Option[LedgerState]
   ): IO[SyncProgress] =
     val headerStream = chainSyncClient.pipelinedHeaderStream(knownPoints, pipelineWindow)
 
@@ -163,7 +166,8 @@ object BlockSyncPipeline:
           tipTopic,
           onProgress,
           progressInterval,
-          headerValidator
+          headerValidator,
+          ledgerState
         )
       }
       .compile
@@ -179,7 +183,8 @@ object BlockSyncPipeline:
       tipTopic: Topic[IO, ChainEvent],
       onProgress: SyncProgress => IO[Unit],
       progressInterval: Int,
-      headerValidator: Option[PermissiveHeaderValidator]
+      headerValidator: Option[PermissiveHeaderValidator],
+      ledgerState: Option[LedgerState]
   ): IO[SyncProgress] =
     // Run permissive header validation (fire-and-forget) for Shelley+ headers
     val validationIO = headerValidator match
@@ -197,6 +202,26 @@ object BlockSyncPipeline:
     validationIO.start *>
       // Delegate to the regular processBatch logic, then publish events
       processBatch(blockFetchClient, syncer, progress, batch, onProgress, progressInterval).flatTap { newProgress =>
+        // Apply blocks to ledger state (permissive — fire-and-forget errors)
+        val ledgerIO = ledgerState match
+          case Some(ls) =>
+            val forwards = batch.collect { case (ChainSyncResponse.RollForward(header, _), _) => header }
+            forwards.traverse_ { wrappedHeader =>
+              HeaderParser.parse(wrappedHeader) match
+                case Right(meta) =>
+                  val bp: Point.BlockPoint = Point.BlockPoint(meta.slotNo, meta.blockHash)
+                  syncer.store.getBlock(bp).flatMap {
+                    case Some(blockData) =>
+                      val bn = BlockNo(newProgress.headersStored - forwards.size + forwards.indexOf(wrappedHeader) + 1)
+                      ls.applyBlock(blockData, bn).handleErrorWith { err =>
+                        logger.debug(s"Ledger apply error at block ${bn.blockNoValue}: ${err.getMessage}")
+                      }
+                    case None => IO.unit
+                  }
+                case Left(_) => IO.unit
+            }
+          case None => IO.unit
+
         // Publish chain events for the batch
         val forwards = batch.collect { case (ChainSyncResponse.RollForward(header, tip), _) =>
           (header, tip)
@@ -221,7 +246,7 @@ object BlockSyncPipeline:
               case Left(_) => IO.unit
           case None => IO.unit
 
-        rollbackPublish *> forwardPublish
+        ledgerIO *> rollbackPublish *> forwardPublish
       }
 
   private def pipelinedSyncLoop(

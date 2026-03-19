@@ -114,8 +114,17 @@ final case class TransactionBody(
     inputs: Vector[TxInput],
     outputs: Vector[TxOutput],
     fee: Lovelace,
-    ttl: Option[SlotNo], // absent in some eras
-    rawCbor: ByteVector  // full raw CBOR for hashing
+    ttl: Option[SlotNo],                         // key 3: absent in some eras
+    validityIntervalStart: Option[SlotNo],       // key 8: Allegra+
+    mint: Option[ByteVector],                    // key 9: Mary+ (raw multi-asset CBOR)
+    scriptDataHash: Option[Hash32],              // key 11: Alonzo+
+    collateralInputs: Vector[TxInput],           // key 13: Alonzo+
+    requiredSigners: Vector[Hash28],             // key 14: Alonzo+
+    networkId: Option[Int],                      // key 15: Alonzo+
+    collateralReturn: Option[TxOutput],          // key 16: Babbage+
+    totalCollateral: Option[Lovelace],           // key 17: Babbage+
+    referenceInputs: Vector[TxInput],            // key 18: Babbage+
+    rawCbor: ByteVector                          // full raw CBOR for hashing
 )
 
 /** Transaction input (all eras). */
@@ -134,3 +143,55 @@ final case class TxOutput(
 enum OutputValue:
   case PureAda(coin: Lovelace)
   case MultiAsset(coin: Lovelace, assets: ByteVector) // raw multi-asset CBOR for now
+
+/**
+ * Full transaction — body + witnesses + metadata.
+ * Used for standalone tx decoding (N2C LocalTxSubmission).
+ *
+ * Conway wire format: [body, witnesses, isValid, auxiliaryData]
+ */
+final case class Transaction(
+    body: TransactionBody,
+    witnesses: TxWitnessSet,
+    isValid: Boolean,
+    auxiliaryData: Option[ByteVector], // raw CBOR
+    rawTx: ByteVector                 // full raw CBOR for the entire tx
+)
+
+/**
+ * Transaction witness set — parsed from CBOR map with numeric keys.
+ *
+ * CBOR map keys:
+ *   0 → vkey witnesses
+ *   1 → native scripts (raw)
+ *   2 → bootstrap witnesses (raw)
+ *   3 → plutus v1 scripts (raw)
+ *   4 → plutus data / datums (raw)
+ *   5 → redeemers (raw)
+ *   6 → plutus v2 scripts (raw)
+ *   7 → plutus v3 scripts (raw)
+ */
+final case class TxWitnessSet(
+    vkeyWitnesses: Vector[VkeyWitness],
+    bootstrapWitnesses: Option[ByteVector], // raw CBOR
+    nativeScripts: Option[ByteVector],      // raw CBOR
+    plutusV1Scripts: Option[ByteVector],    // raw CBOR
+    plutusV2Scripts: Option[ByteVector],    // raw CBOR
+    plutusV3Scripts: Option[ByteVector],    // raw CBOR
+    datums: Option[ByteVector],             // raw CBOR (plutus data)
+    redeemers: Option[ByteVector]           // raw CBOR
+)
+
+object TxWitnessSet:
+  val empty: TxWitnessSet = TxWitnessSet(
+    Vector.empty, None, None, None, None, None, None, None
+  )
+
+/**
+ * VKey witness — Ed25519 public key + signature.
+ * Used for verifying transaction authorization.
+ */
+final case class VkeyWitness(
+    vkey: ByteVector,      // 32-byte Ed25519 public key
+    signature: ByteVector  // 64-byte Ed25519 signature
+)

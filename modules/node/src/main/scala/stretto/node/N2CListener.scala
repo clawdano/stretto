@@ -6,7 +6,8 @@ import com.comcast.ip4s.{Host, Port}
 import fs2.concurrent.Topic
 import fs2.io.net.Network
 import org.typelevel.log4cats.slf4j.Slf4jLogger
-// N2CConnectionHandler is in this same package
+import stretto.core.Types.*
+import stretto.mempool.Mempool
 import stretto.storage.RocksDbStore
 
 /**
@@ -36,7 +37,10 @@ object N2CListener:
       tipTopic: Topic[IO, ChainEvent],
       networkMagic: Long,
       maxClients: Int = 32,
-      genesis: GenesisConfig = GenesisConfig.Preprod
+      genesis: GenesisConfig = GenesisConfig.Preprod,
+      mempool: Option[Mempool] = None,
+      ledgerState: Option[LedgerState] = None,
+      currentSlotRef: () => IO[SlotNo] = () => IO.pure(SlotNo(0L))
   ): IO[Nothing] =
     val hostParsed = Host.fromString(host)
     val portParsed = Port.fromInt(port)
@@ -61,7 +65,7 @@ object N2CListener:
                       addr <- clientAddr
                       _    <- logger.info(s"N2C client connected: $addr")
                       _ <- N2CConnectionHandler
-                        .handle(socket, store, tipTopic, networkMagic, genesis)
+                        .handle(socket, store, tipTopic, networkMagic, genesis, mempool, ledgerState, currentSlotRef)
                         .guarantee(
                           clientAddr
                             .flatMap(a => logger.info(s"N2C client disconnected: $a"))

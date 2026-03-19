@@ -4,6 +4,8 @@ import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import fs2.concurrent.Topic
 import org.typelevel.log4cats.slf4j.Slf4jLogger
+import stretto.core.Types.*
+import stretto.mempool.Mempool
 import stretto.storage.RocksDbStore
 
 import java.nio.file.Path
@@ -69,9 +71,11 @@ object RelayNode:
           if config.metricsPort > 0
           then logger.info(s"Metrics: http://${config.listenHost}:${config.metricsPort}/metrics")
           else logger.info("Metrics server: disabled")
-        // Create permissive header validator
+        // Create permissive header validator and ledger state
         genesis = GenesisConfig.forNetwork(config.networkName)
         headerValidator <- PermissiveHeaderValidator.create(metricsRef, genesis)
+        ledgerState = new LedgerState(store)
+        mempool <- Mempool.create(utxoLookup = input => store.getUtxo(input))
         n2nListener =
           if config.n2nListenPort > 0 then
             N2NListener.listen(
@@ -83,6 +87,13 @@ object RelayNode:
               config.maxN2NPeers
             )
           else IO.never[Nothing]
+        // Current slot tracking for tx validation
+        currentSlotRef = () => store.getTip.map {
+          case Some(tip) => tip.point match
+            case bp: stretto.core.Point.BlockPoint => bp.slotNo
+            case _ => SlotNo(0L)
+          case None => SlotNo(0L)
+        }
         n2cListener =
           if config.n2cListenPort > 0 then
             N2CListener.listen(
@@ -92,7 +103,10 @@ object RelayNode:
               tipTopic,
               config.networkMagic,
               config.maxN2CClients,
-              genesis
+              genesis,
+              mempool = Some(mempool),
+              ledgerState = Some(ledgerState),
+              currentSlotRef = currentSlotRef
             )
           else IO.never[Nothing]
         metricsServer =
@@ -101,7 +115,7 @@ object RelayNode:
           else IO.never[Nothing]
         // All fibers run forever (IO[Nothing]).
         // Start upstream sync + optional listeners concurrently
-        upstreamFiber <- upstreamSyncLoop(config, store, tipTopic, metricsRef, headerValidator).start
+        upstreamFiber <- upstreamSyncLoop(config, store, tipTopic, metricsRef, headerValidator, ledgerState).start
         _             <- n2nListener.start
         _             <- n2cListener.start
         _             <- metricsServer.start
@@ -118,7 +132,8 @@ object RelayNode:
       store: RocksDbStore,
       tipTopic: Topic[IO, ChainEvent],
       metricsRef: Ref[IO, MetricsServer.Metrics],
-      headerValidator: PermissiveHeaderValidator
+      headerValidator: PermissiveHeaderValidator,
+      ledgerState: LedgerState
   ): IO[Nothing] =
     def syncOnce: IO[BlockSyncPipeline.SyncProgress] =
       BlockSyncPipeline.syncWithTopic(
@@ -130,6 +145,7 @@ object RelayNode:
         tipTopic = tipTopic,
         keepAliveInterval = config.keepAliveInterval,
         headerValidator = Some(headerValidator),
+        ledgerState = Some(ledgerState),
         onProgress = progress =>
           metricsRef.update(m =>
             m.copy(

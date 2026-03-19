@@ -123,6 +123,9 @@ lazy val mempool = project
   .settings(commonSettings)
   .settings(
     name := "stretto-mempool",
+    libraryDependencies ++= Seq(
+      "org.typelevel" %% "cats-effect" % catsEffectVersion,
+    ),
   )
 
 lazy val storage = project

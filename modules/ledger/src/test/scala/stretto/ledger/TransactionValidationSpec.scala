@@ -37,6 +37,15 @@ class TransactionValidationSpec extends FunSuite:
       outputs = outputs,
       fee = Lovelace(fee),
       ttl = ttl.map(SlotNo.apply),
+      validityIntervalStart = None,
+      mint = None,
+      scriptDataHash = None,
+      collateralInputs = Vector.empty,
+      requiredSigners = Vector.empty,
+      networkId = None,
+      collateralReturn = None,
+      totalCollateral = None,
+      referenceInputs = Vector.empty,
       rawCbor = ByteVector.fill(cborSize.toLong)(0x00)
     )
 

@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.1.0-SNAPSHOT] - 2026-03-19
 
+### Added
+- **Full ledger state during sync** — live UTxO set maintained in RocksDB as blocks are synced:
+  - New `utxos` and `ledger_meta` RocksDB column families for persistent UTxO storage
+  - `RocksDbStore.applyUtxoDelta` / `applyUtxoDeltaWithHeight` — atomic UTxO batch writes
+  - `LedgerState` — IO-based wrapper that decodes blocks and writes UTxO deltas during sync
+  - Integrated into `BlockSyncPipeline` in permissive mode (logs errors, never rejects)
+- **Full transaction decoding** — extended `TransactionBody` with all post-Shelley fields:
+  - `validityIntervalStart` (Allegra+), `mint` (Mary+), `scriptDataHash`, `collateralInputs`, `requiredSigners`, `networkId`, `collateralReturn`, `totalCollateral`, `referenceInputs` (Alonzo/Babbage+)
+  - `Transaction`, `TxWitnessSet`, `VkeyWitness` types for full tx representation
+  - `BlockDecoder.decodeTx` — standalone Conway-era transaction decoder for N2C submission
+  - `BlockDecoder.decodeWitnessSet` — parses vkey witnesses (key 0) fully, captures other witness keys as raw CBOR
+  - Witness sets now parsed from blocks (previously skipped)
+- **Witness verification** — Ed25519 signature verification for transaction authorization:
+  - `WitnessValidator` — verifies vkey witnesses against tx body hash, checks payment key coverage and required signers
+  - `Address.extractPaymentCredential` — parses Shelley address types 0-7 to extract payment credentials
+  - `TransactionValidation.validateFullTx` — combined UTxO + witness validation
+  - New validation errors: `WitnessVerificationFailed`, `RequiredSignerMissing`, `ValidityIntervalStartNotReached`
+- **Transaction mempool** — concurrent tx pool with UTxO overlay:
+  - `Mempool` — `Ref[IO, MempoolState]`-backed pool with `addTx`, `removeTxs`, `getTxs`
+  - Virtual UTxO view: chain UTxO + mempool outputs - mempool inputs for double-spend detection
+  - Fee-density-based eviction when pool exceeds max size
+- **LocalTxSubmission N2C server** — accepts transactions from cardano-cli and wallets:
+  - `LocalTxSubmissionServer` — N2C mini-protocol ID 6 server implementation
+  - Protocol: `MsgSubmitTx` → decode + validate via mempool → `MsgAcceptTx` / `MsgRejectTx`
+  - Wired into `N2CConnectionHandler` as third concurrent protocol alongside ChainSync and LSQ
+
 ### Fixed
 - **N2N/N2C socket scoping** — listeners used `evalMap` + `.start` which released the fs2 socket scope immediately, killing connections. Fixed with `map` + `parJoin` to keep socket alive for the handler's lifetime
 - **Mux frame segmentation** — `MuxDemuxer.send`/`sendResponse` sent entire payloads in one frame. The mux wire format uses a 16-bit length field (max 65535 bytes); Shelley+ blocks exceeding 65KB caused length overflow and silent stream corruption. Fixed by segmenting large payloads across multiple frames under the write lock (receive-side reassembly already existed)

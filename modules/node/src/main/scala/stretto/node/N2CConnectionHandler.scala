@@ -1,9 +1,12 @@
 package stretto.node
 
 import cats.effect.IO
+import cats.syntax.all.*
 import fs2.concurrent.Topic
 import fs2.io.net.Socket
 import org.typelevel.log4cats.slf4j.Slf4jLogger
+import stretto.core.Types.*
+import stretto.mempool.Mempool
 import stretto.network.{HandshakeMessage, MuxDemuxer}
 import stretto.storage.RocksDbStore
 
@@ -12,7 +15,8 @@ import scala.concurrent.duration.*
 /**
  * Handles a single N2C client connection.
  *
- * Performs the N2C handshake as responder, then runs the ChainSync N2C server loop.
+ * Performs the N2C handshake as responder, then runs ChainSync, LSQ,
+ * and LocalTxSubmission servers concurrently.
  */
 object N2CConnectionHandler:
 
@@ -27,13 +31,20 @@ object N2CConnectionHandler:
    * @param store        the RocksDB store for reading blocks
    * @param tipTopic     topic for chain tip events
    * @param networkMagic the network magic for handshake
+   * @param genesis      genesis config for LSQ
+   * @param mempool      transaction mempool (None = tx submission disabled)
+   * @param ledgerState  ledger state (None = tx submission disabled)
+   * @param currentSlotRef function to get current slot
    */
   def handle(
       socket: Socket[IO],
       store: RocksDbStore,
       tipTopic: Topic[IO, ChainEvent],
       networkMagic: Long,
-      genesis: GenesisConfig
+      genesis: GenesisConfig,
+      mempool: Option[Mempool] = None,
+      ledgerState: Option[LedgerState] = None,
+      currentSlotRef: () => IO[SlotNo] = () => IO.pure(SlotNo(0L))
   ): IO[Unit] =
     for
       mux <- MuxDemuxer(socket)
@@ -46,5 +57,11 @@ object N2CConnectionHandler:
       _ <- logger.info(s"N2C handshake accepted version $version")
       chainSync = new ChainSyncServer(mux, store, tipTopic)
       lsqServer = new LocalStateQueryServer(mux, store, genesis)
-      _ <- IO.both(chainSync.serve, lsqServer.serve).void
+      // Run ChainSync + LSQ + optional LocalTxSubmission concurrently
+      _ <- (mempool, ledgerState) match
+        case (Some(mp), Some(ls)) =>
+          val txSubmit = new LocalTxSubmissionServer(mux, mp, ls, currentSlotRef)
+          (chainSync.serve, lsqServer.serve, txSubmit.serve).parTupled.void
+        case _ =>
+          IO.both(chainSync.serve, lsqServer.serve).void
     yield ()
