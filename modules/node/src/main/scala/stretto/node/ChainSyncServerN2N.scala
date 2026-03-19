@@ -135,20 +135,7 @@ final class ChainSyncServerN2N(
         }
 
   private def findBlockNoForPoint(point: Point.BlockPoint): IO[Option[BlockNo]] =
-    store.getMaxHeight.flatMap {
-      case None => IO.pure(None)
-      case Some(maxH) =>
-        def scan(height: Long): IO[Option[BlockNo]] =
-          if height < 0 then IO.pure(None)
-          else
-            store.getPointByHeight(BlockNo(height)).flatMap {
-              case Some(p) if p == point => IO.pure(Some(BlockNo(height)))
-              case _ =>
-                if height > maxH.blockNoValue - 1000 then scan(height - 1)
-                else IO.pure(None)
-            }
-        scan(maxH.blockNoValue)
-    }
+    store.getHeightByPoint(point)
 
   private def handleRequestNext(cursorRef: Ref[IO, BlockNo]): IO[Unit] =
     for

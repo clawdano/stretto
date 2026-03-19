@@ -26,23 +26,15 @@ object N2NConnectionHandler:
 
   private val HandshakeTimeout = 30.seconds
 
-  /**
-   * Handle a single inbound N2N peer connection from accept to close.
-   *
-   * @param socket       the accepted TCP socket
-   * @param store        the RocksDB store for reading headers and blocks
-   * @param tipTopic     topic for chain tip events
-   * @param networkMagic the network magic for handshake
-   */
   def handle(
       socket: Socket[IO],
       store: RocksDbStore,
       tipTopic: Topic[IO, ChainEvent],
       networkMagic: Long
   ): IO[Unit] =
-    for
+    (for
       mux <- MuxDemuxer(socket)
-      _   <- logger.debug("N2N: mux created, starting handshake")
+      _   <- logger.info("N2N: mux created, awaiting handshake")
       version <- HandshakeMessage
         .handshakeN2NServer(mux, networkMagic)
         .timeoutTo(
@@ -53,11 +45,11 @@ object N2NConnectionHandler:
       chainSync  = new ChainSyncServerN2N(mux, store, tipTopic)
       blockFetch = new BlockFetchServer(mux, store)
       keepAlive  = new KeepAliveClient(mux)
-      // Run ChainSync server, BlockFetch server, and KeepAlive responder concurrently.
-      // All three block forever; if any exits (error or client done), the handler cleans up.
       _ <- (
         chainSync.serve.handleErrorWith(e => logger.warn(s"N2N ChainSync server error: ${e.getMessage}")),
         blockFetch.serve.handleErrorWith(e => logger.warn(s"N2N BlockFetch server error: ${e.getMessage}")),
         keepAlive.respondLoop
       ).parTupled.void
-    yield ()
+    yield ()).handleErrorWith { e =>
+      logger.warn(s"N2N connection handler error: ${e.getClass.getSimpleName}: ${e.getMessage}")
+    }

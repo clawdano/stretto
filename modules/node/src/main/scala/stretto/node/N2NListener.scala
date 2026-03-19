@@ -46,33 +46,37 @@ object N2NListener:
           _    <- logger.info(s"N2N listener starting on $host:$port (max $maxPeers peers)")
           result <- Network[IO]
             .server(address = Some(h), port = Some(p))
-            .evalMap { socket =>
-              gate.tryAcquire.flatMap {
-                case true =>
-                  val clientAddr = socket.remoteAddress
-                  (for
-                    addr <- clientAddr
-                    _    <- logger.info(s"N2N peer connected: $addr")
-                    _ <- N2NConnectionHandler
-                      .handle(socket, store, tipTopic, networkMagic)
-                      .guarantee(
-                        clientAddr
-                          .flatMap(a => logger.info(s"N2N peer disconnected: $a"))
-                          .handleError(_ => ()) *>
+            .map { socket =>
+              // Each socket is resource-scoped by fs2; using map+parJoin keeps
+              // the scope alive for the entire handler lifetime (not evalMap+start
+              // which would release the socket immediately).
+              fs2.Stream.eval(
+                gate.tryAcquire.flatMap {
+                  case true =>
+                    val clientAddr = socket.remoteAddress
+                    (for
+                      addr <- clientAddr
+                      _    <- logger.info(s"N2N peer connected: $addr")
+                      _ <- N2NConnectionHandler
+                        .handle(socket, store, tipTopic, networkMagic)
+                        .guarantee(
+                          clientAddr
+                            .flatMap(a => logger.info(s"N2N peer disconnected: $a"))
+                            .handleError(_ => ()) *>
+                            gate.release
+                        )
+                    yield ())
+                      .handleErrorWith { err =>
+                        logger.warn(s"N2N peer error: ${err.getMessage}") *>
                           gate.release
-                      )
-                  yield ())
-                    .handleErrorWith { err =>
-                      logger.warn(s"N2N peer error: ${err.getMessage}") *>
-                        gate.release
-                    }
-                    .start
-                    .void
-                case false =>
-                  logger.warn(s"N2N connection rejected: max peers ($maxPeers) reached") *>
-                    socket.endOfOutput.attempt.void
-              }
+                      }
+                  case false =>
+                    logger.warn(s"N2N connection rejected: max peers ($maxPeers) reached") *>
+                      socket.endOfOutput.attempt.void
+                }
+              )
             }
+            .parJoin(maxPeers)
             .compile
             .drain
           never <- IO.never[Nothing]

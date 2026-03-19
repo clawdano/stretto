@@ -213,23 +213,34 @@ final class MuxDemuxer private (
 
   /** Send a payload on the given mini-protocol id (initiator direction). */
   def send(miniProtocolId: Int, payload: ByteVector): IO[Unit] =
-    val frame = MuxFrame(
-      transmissionTime = 0L,
-      miniProtocolId = miniProtocolId,
-      isResponse = false,
-      payload = payload
-    )
-    writeLock.permit.use(_ => socket.write(Chunk.byteVector(MuxFrame.encode(frame))))
+    sendSegmented(miniProtocolId, payload, isResponse = false)
 
   /** Send a response payload on the given mini-protocol id. */
   def sendResponse(miniProtocolId: Int, payload: ByteVector): IO[Unit] =
-    val frame = MuxFrame(
-      transmissionTime = 0L,
-      miniProtocolId = miniProtocolId,
-      isResponse = true,
-      payload = payload
-    )
-    writeLock.permit.use(_ => socket.write(Chunk.byteVector(MuxFrame.encode(frame))))
+    sendSegmented(miniProtocolId, payload, isResponse = true)
+
+  /**
+   * Send a payload, segmenting into multiple mux frames if it exceeds
+   * MaxPayloadSize (65535 bytes). All segments are sent under the write
+   * lock to prevent interleaving with other protocols.
+   */
+  private def sendSegmented(miniProtocolId: Int, payload: ByteVector, isResponse: Boolean): IO[Unit] =
+    writeLock.permit.use { _ =>
+      def writeChunks(remaining: ByteVector): IO[Unit] =
+        if remaining.isEmpty then IO.unit
+        else
+          val chunkSize = math.min(remaining.size, MuxFrame.MaxPayloadSize.toLong).toInt
+          val chunk     = remaining.take(chunkSize.toLong)
+          val rest      = remaining.drop(chunkSize.toLong)
+          val frame = MuxFrame(
+            transmissionTime = 0L,
+            miniProtocolId = miniProtocolId,
+            isResponse = isResponse,
+            payload = chunk
+          )
+          socket.write(Chunk.byteVector(MuxFrame.encode(frame))) *> writeChunks(rest)
+      writeChunks(payload)
+    }
 
   /**
    * Receive one complete reassembled message for a specific mini-protocol.

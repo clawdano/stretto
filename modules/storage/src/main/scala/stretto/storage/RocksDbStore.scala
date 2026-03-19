@@ -24,7 +24,8 @@ final class RocksDbStore private (
     cfHeaders: ColumnFamilyHandle,
     cfMeta: ColumnFamilyHandle,
     cfByHeight: ColumnFamilyHandle,
-    cfBlocks: ColumnFamilyHandle
+    cfBlocks: ColumnFamilyHandle,
+    cfPointToHeight: ColumnFamilyHandle
 ) extends ChainStore:
 
   // ---------------------------------------------------------------------------
@@ -145,8 +146,10 @@ final class RocksDbStore private (
     IO {
       val batch = new WriteBatch()
       try
-        batch.put(cfHeaders, pointKey(point), header.toArray)
-        batch.put(cfByHeight, heightKey(blockNo), pointKey(point))
+        val pk = pointKey(point)
+        batch.put(cfHeaders, pk, header.toArray)
+        batch.put(cfByHeight, heightKey(blockNo), pk)
+        batch.put(cfPointToHeight, pk, heightKey(blockNo))
         batch.put(cfMeta, tipKey, encodeTip(tip))
         db.write(new WriteOptions(), batch)
       finally batch.close()
@@ -161,8 +164,11 @@ final class RocksDbStore private (
       val batch = new WriteBatch()
       try
         entries.foreach { case (point, header, blockNo) =>
-          batch.put(cfHeaders, pointKey(point), header.toArray)
-          batch.put(cfByHeight, heightKey(blockNo), pointKey(point))
+          val pk = pointKey(point)
+          val hk = heightKey(blockNo)
+          batch.put(cfHeaders, pk, header.toArray)
+          batch.put(cfByHeight, hk, pk)
+          batch.put(cfPointToHeight, pk, hk)
         }
         batch.put(cfMeta, tipKey, encodeTip(tip))
         db.write(new WriteOptions(), batch)
@@ -188,9 +194,11 @@ final class RocksDbStore private (
       try
         entries.foreach { case (point, header, blockNo, blockData) =>
           val pk = pointKey(point)
+          val hk = heightKey(blockNo)
           batch.put(cfHeaders, pk, header.toArray)
           batch.put(cfBlocks, pk, blockData.toArray)
-          batch.put(cfByHeight, heightKey(blockNo), pk)
+          batch.put(cfByHeight, hk, pk)
+          batch.put(cfPointToHeight, pk, hk)
         }
         batch.put(cfMeta, tipKey, encodeTip(tip))
         db.write(new WriteOptions(), batch)
@@ -203,6 +211,7 @@ final class RocksDbStore private (
     cfMeta.close()
     cfByHeight.close()
     cfBlocks.close()
+    cfPointToHeight.close()
     db.close()
 
   /** Get the point stored at a given block height, if any. */
@@ -233,6 +242,23 @@ final class RocksDbStore private (
       finally it.close()
     }
 
+  /** O(1) reverse lookup: point → block height. */
+  def getHeightByPoint(point: Point.BlockPoint): IO[Option[BlockNo]] =
+    IO {
+      Option(db.get(cfPointToHeight, pointKey(point))).map { bytes =>
+        val bn =
+          ((bytes(0).toLong & 0xff) << 56) |
+            ((bytes(1).toLong & 0xff) << 48) |
+            ((bytes(2).toLong & 0xff) << 40) |
+            ((bytes(3).toLong & 0xff) << 32) |
+            ((bytes(4).toLong & 0xff) << 24) |
+            ((bytes(5).toLong & 0xff) << 16) |
+            ((bytes(6).toLong & 0xff) << 8) |
+            (bytes(7).toLong & 0xff)
+        BlockNo(bn)
+      }
+    }
+
   def recentPoints(count: Int): IO[List[Point.BlockPoint]] =
     IO {
       val it = db.newIterator(cfByHeight)
@@ -253,7 +279,7 @@ object RocksDbStore:
   /** Load the RocksDB native library once. */
   RocksDB.loadLibrary()
 
-  private val cfNames = List("default", "headers", "meta", "by_height", "blocks")
+  private val cfNames = List("default", "headers", "meta", "by_height", "blocks", "point_to_height")
 
   /**
    * Open a RocksDB-backed chain store as a cats-effect Resource.
@@ -285,7 +311,8 @@ object RocksDbStore:
       cfHeaders = cfHandles.get(1),
       cfMeta = cfHandles.get(2),
       cfByHeight = cfHandles.get(3),
-      cfBlocks = cfHandles.get(4)
+      cfBlocks = cfHandles.get(4),
+      cfPointToHeight = cfHandles.get(5)
     )
   }
 

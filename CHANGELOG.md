@@ -4,7 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.1.0-SNAPSHOT] - 2026-03-17
+## [0.1.0-SNAPSHOT] - 2026-03-19
+
+### Fixed
+- **N2N/N2C socket scoping** — listeners used `evalMap` + `.start` which released the fs2 socket scope immediately, killing connections. Fixed with `map` + `parJoin` to keep socket alive for the handler's lifetime
+- **Mux frame segmentation** — `MuxDemuxer.send`/`sendResponse` sent entire payloads in one frame. The mux wire format uses a 16-bit length field (max 65535 bytes); Shelley+ blocks exceeding 65KB caused length overflow and silent stream corruption. Fixed by segmenting large payloads across multiple frames under the write lock (receive-side reassembly already existed)
+- **BlockFetch/ChainSync server height lookup** — `findHeight` did a linear reverse scan capped at 10k blocks from tip; couldn't find older blocks. Added `point_to_height` RocksDB column family for O(1) point→height reverse lookups
+
+### Changed
 
 ### Added
 - **Ouroboros Praos consensus module** — full 4-phase implementation:

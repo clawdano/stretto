@@ -91,19 +91,6 @@ final class BlockFetchServer(
           IO.unit
       }
 
-  /** Find the block height for a given point. */
+  /** O(1) reverse lookup: point → block height via the point_to_height index. */
   private def findHeight(point: Point.BlockPoint): IO[Option[BlockNo]] =
-    store.getMaxHeight.flatMap {
-      case None => IO.pure(None)
-      case Some(maxH) =>
-        def scan(height: Long): IO[Option[BlockNo]] =
-          if height < 0 then IO.pure(None)
-          else
-            store.getPointByHeight(BlockNo(height)).flatMap {
-              case Some(p) if p == point => IO.pure(Some(BlockNo(height)))
-              case _ =>
-                if height > maxH.blockNoValue - 10000 then scan(height - 1)
-                else IO.pure(None)
-            }
-        scan(maxH.blockNoValue)
-    }
+    store.getHeightByPoint(point)

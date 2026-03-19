@@ -50,33 +50,36 @@ object N2CListener:
             else IO.unit
           result <- Network[IO]
             .server(address = Some(h), port = Some(p))
-            .evalMap { socket =>
-              gate.tryAcquire.flatMap {
-                case true =>
-                  val clientAddr = socket.remoteAddress
-                  (for
-                    addr <- clientAddr
-                    _    <- logger.info(s"N2C client connected: $addr")
-                    _ <- N2CConnectionHandler
-                      .handle(socket, store, tipTopic, networkMagic, genesis)
-                      .guarantee(
-                        clientAddr
-                          .flatMap(a => logger.info(s"N2C client disconnected: $a"))
-                          .handleError(_ => ()) *>
+            .map { socket =>
+              // Each socket is resource-scoped by fs2; using map+parJoin keeps
+              // the scope alive for the entire handler lifetime.
+              fs2.Stream.eval(
+                gate.tryAcquire.flatMap {
+                  case true =>
+                    val clientAddr = socket.remoteAddress
+                    (for
+                      addr <- clientAddr
+                      _    <- logger.info(s"N2C client connected: $addr")
+                      _ <- N2CConnectionHandler
+                        .handle(socket, store, tipTopic, networkMagic, genesis)
+                        .guarantee(
+                          clientAddr
+                            .flatMap(a => logger.info(s"N2C client disconnected: $a"))
+                            .handleError(_ => ()) *>
+                            gate.release
+                        )
+                    yield ())
+                      .handleErrorWith { err =>
+                        logger.warn(s"N2C client error: ${err.getMessage}") *>
                           gate.release
-                      )
-                  yield ())
-                    .handleErrorWith { err =>
-                      logger.warn(s"N2C client error: ${err.getMessage}") *>
-                        gate.release
-                    }
-                    .start
-                    .void
-                case false =>
-                  logger.warn(s"N2C connection rejected: max clients ($maxClients) reached") *>
-                    socket.endOfOutput.attempt.void
-              }
+                      }
+                  case false =>
+                    logger.warn(s"N2C connection rejected: max clients ($maxClients) reached") *>
+                      socket.endOfOutput.attempt.void
+                }
+              )
             }
+            .parJoin(maxClients)
             .compile
             .drain
           never <- IO.never[Nothing]
