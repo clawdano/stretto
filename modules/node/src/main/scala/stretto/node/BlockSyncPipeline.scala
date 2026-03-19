@@ -108,7 +108,8 @@ object BlockSyncPipeline:
       keepAliveInterval: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(10, "s"),
       progressInterval: Int = 500,
       pipelineWindow: Int = 100,
-      batchSize: Int = 50
+      batchSize: Int = 50,
+      headerValidator: Option[PermissiveHeaderValidator] = None
   ): IO[SyncProgress] =
     val syncer = new BlockSyncer(store)
     MuxConnection.connectWithTimeout(host, port, networkMagic).use { conn =>
@@ -128,7 +129,8 @@ object BlockSyncPipeline:
           onProgress,
           progressInterval,
           pipelineWindow,
-          batchSize
+          batchSize,
+          headerValidator
         )
         _ <- blockFetchClient.done
       yield result
@@ -144,7 +146,8 @@ object BlockSyncPipeline:
       onProgress: SyncProgress => IO[Unit],
       progressInterval: Int,
       pipelineWindow: Int,
-      batchSize: Int
+      batchSize: Int,
+      headerValidator: Option[PermissiveHeaderValidator]
   ): IO[SyncProgress] =
     val headerStream = chainSyncClient.pipelinedHeaderStream(knownPoints, pipelineWindow)
 
@@ -159,7 +162,8 @@ object BlockSyncPipeline:
           chunk.toList,
           tipTopic,
           onProgress,
-          progressInterval
+          progressInterval,
+          headerValidator
         )
       }
       .compile
@@ -174,8 +178,23 @@ object BlockSyncPipeline:
       batch: List[(ChainSyncResponse, Long)],
       tipTopic: Topic[IO, ChainEvent],
       onProgress: SyncProgress => IO[Unit],
-      progressInterval: Int
+      progressInterval: Int,
+      headerValidator: Option[PermissiveHeaderValidator]
   ): IO[SyncProgress] =
+    // Run permissive header validation (fire-and-forget) for Shelley+ headers
+    val validationIO = headerValidator match
+      case Some(validator) =>
+        val forwards = batch.collect { case (ChainSyncResponse.RollForward(header, _), _) => header }
+        forwards.traverse_ { wrappedHeader =>
+          HeaderParser.parse(wrappedHeader) match
+            case Right(meta) =>
+              validator.validatePermissive(wrappedHeader, meta.era).handleErrorWith(_ => IO.unit)
+            case Left(_) => IO.unit
+        }
+      case None => IO.unit
+
+    // Run validation concurrently with the main processing — fire-and-forget
+    validationIO.start *>
     // Delegate to the regular processBatch logic, then publish events
     processBatch(blockFetchClient, syncer, progress, batch, onProgress, progressInterval).flatTap { newProgress =>
       // Publish chain events for the batch

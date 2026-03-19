@@ -26,6 +26,42 @@ object BlockDecoder:
   // CBOR break byte (0xFF) terminates indefinite-length collections
   private val BreakByte: Int = 0xff
 
+  /**
+   * Decode only the header from an era-wrapped header (as received from ChainSync N2N).
+   *
+   * Wire format from ChainSync:
+   *   - Byron (era 0): [0, [[sub_tag, param], tag24(headerBytes)]]
+   *   - Shelley+ (era 1-6): [era_tag, tag24(headerBytes)]
+   *
+   * The tag24 wraps the raw header CBOR. For Shelley+ headers, we unwrap tag24,
+   * then decode the header using the same logic as full block decoding.
+   *
+   * @param wrappedHeader the era-wrapped header bytes from ChainSync
+   * @return Left for Byron (era <= 1), Right((era, header)) for Shelley+
+   */
+  def decodeHeaderOnly(wrappedHeader: ByteVector): Either[String, (Era, ShelleyHeader)] =
+    for
+      (arrLen, afterArr) <- readArrayHeader(wrappedHeader, 0)
+      _                  <- require(arrLen == 2, s"expected 2-element era wrapper, got $arrLen")
+      (eraTag, afterEra) <- readUInt(wrappedHeader, afterArr)
+      result <- eraTag.toInt match
+        case 0 => Left("Byron era headers predate Praos — skipping")
+        case t if t >= 1 && t <= 6 =>
+          val era = (t + 1) match
+            case 2 => Era.Shelley
+            case 3 => Era.Allegra
+            case 4 => Era.Mary
+            case 5 => Era.Alonzo
+            case 6 => Era.Babbage
+            case 7 => Era.Conway
+            case _ => Era.Conway
+          // Read tag24-wrapped header bytes
+          readTag24ByteString(wrappedHeader, afterEra).flatMap { case (headerBytes, _) =>
+            decodeShelleyHeader(headerBytes, 0, era).map { case (_, header) => (era, header) }
+          }
+        case t => Left(s"unknown era tag: $t")
+    yield result
+
   /** Decode an era-wrapped block from hex-encoded CBOR. */
   def decodeHex(hex: String): Either[String, Block] =
     ByteVector.fromHex(hex) match

@@ -134,6 +134,85 @@ object HeaderValidation:
       )
     yield ()
 
+  /**
+   * Validate a Shelley+ block header, collecting all errors instead of short-circuiting.
+   *
+   * Steps 2-4 (KES period, OCert sig, KES sig) are independent of pool data and always run.
+   * Steps 5-7 (VRF key match, VRF proof, leader check) depend on pool lookup — skipped if pool not found.
+   *
+   * @return empty list if all checks pass, otherwise a list of all validation errors encountered
+   */
+  def validateAll(
+      header: ShelleyHeader,
+      era: Era,
+      epochNonce: ByteVector,
+      lookupPool: ByteVector => Option[PoolInfo],
+      params: ConsensusParams = ConsensusParams()
+  ): List[HeaderValidationError] =
+    val issuerHash = Crypto.blake2b256(header.issuerVkey)
+
+    // --- Steps 2-4: independent of pool data, always run ---
+
+    // 2. Check KES period bounds
+    val currentPeriod  = header.slotNo.value / params.slotsPerKesEvolution
+    val relativePeriod = (currentPeriod - header.ocert.startKesPeriod).toInt
+    val step2 =
+      if header.ocert.startKesPeriod <= currentPeriod && relativePeriod < params.maxKesEvolutions then Nil
+      else List(HeaderValidationError.KesPeriodOutOfRange(relativePeriod, header.ocert.startKesPeriod, params.maxKesEvolutions))
+
+    // 3. Verify OCert: Ed25519 signature by cold key over (hotVkey || counter || startKesPeriod)
+    val ocertMsg = header.ocert.hotVkey ++
+      ByteVector.fromLong(header.ocert.counter) ++
+      ByteVector.fromLong(header.ocert.startKesPeriod)
+    val step3 =
+      if Crypto.Ed25519.verify(header.issuerVkey, ocertMsg, header.ocert.coldSignature) then Nil
+      else List(HeaderValidationError.OcertSignatureInvalid)
+
+    // 4. Verify KES signature over raw header body
+    val step4 =
+      if SumKES.verify(
+           vk = header.ocert.hotVkey,
+           period = relativePeriod,
+           message = header.rawHeaderBody,
+           signature = header.kesSignature
+         )
+      then Nil
+      else List(HeaderValidationError.KesSignatureInvalid)
+
+    // --- Steps 1, 5-7: depend on pool lookup ---
+    val poolErrors = lookupPool(issuerHash) match
+      case None =>
+        List(HeaderValidationError.PoolNotRegistered(issuerHash))
+      case Some(pool) =>
+        // 5. Verify VRF key: hash of vrfVkey must match pool's registered VRF key hash
+        val vrfHash = Hash32.unsafeFrom(Crypto.blake2b256(header.vrfVkey))
+        val step5 =
+          if vrfHash == pool.vrfKeyHash then Nil
+          else List(HeaderValidationError.VrfKeyMismatch(pool.vrfKeyHash, vrfHash))
+
+        // 6. Verify VRF proof(s)
+        val (step6, vrfOutputOpt) = verifyVrf(header, epochNonce) match
+          case Right(output) => (Nil, Some(output))
+          case Left(err)     => (List(err), None)
+
+        // 7. Leader election check (only if VRF output available)
+        val step7 = vrfOutputOpt match
+          case Some(vrfOutput) =>
+            val certNat = VrfInput.certNatFromOutput(vrfOutput)
+            if LeaderCheck.isLeader(
+                 certNat,
+                 BigInt(pool.relativeStakeNum),
+                 BigInt(pool.relativeStakeDen),
+                 params.activeSlotCoeff
+               )
+            then Nil
+            else List(HeaderValidationError.LeaderCheckFailed)
+          case None => Nil // skip if VRF verification failed
+
+        step5 ++ step6 ++ step7
+
+    step2 ++ step3 ++ step4 ++ poolErrors
+
   /** Verify VRF proof(s) and return the output used for leader check. */
   private def verifyVrf(
       header: ShelleyHeader,

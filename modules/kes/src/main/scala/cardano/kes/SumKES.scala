@@ -31,11 +31,22 @@ object SumKES:
   /** The depth used in Cardano (Sum6KES). */
   val CardanoDepth: Int = 6
 
-  /** Expected signature size for Sum6KES: 64 (sig) + 32 (leaf vk) + 32*6 (companions) = 288. */
-  val Sum6SignatureSize: Int = signatureSize(CardanoDepth)
+  /** Expected compact signature size for Sum6KES: 64 (sig) + 32 (leaf vk) + 32*6 (companions) = 288. */
+  val Sum6SignatureSize: Int = compactSignatureSize(CardanoDepth)
 
-  /** Calculate expected signature size for a given depth. */
-  def signatureSize(depth: Int): Int = 64 + 32 + 32 * depth
+  /** Expected standard (wire) signature size for Sum6KES: 64 + 6*64 = 448. */
+  val Sum6StandardSignatureSize: Int = standardSignatureSize(CardanoDepth)
+
+  /** Calculate expected compact signature size for a given depth. */
+  def compactSignatureSize(depth: Int): Int = 64 + 32 + 32 * depth
+
+  /** Calculate expected standard (wire) signature size for a given depth.
+   *  Standard format: at each level stores (innerSig, leftVK(32), rightVK(32)).
+   *  Size(0) = 64 (Ed25519), Size(d) = Size(d-1) + 64 = 64 + d*64 */
+  def standardSignatureSize(depth: Int): Int = 64 + depth * 64
+
+  // Keep backward compat
+  def signatureSize(depth: Int): Int = compactSignatureSize(depth)
 
   /**
    * Verify a CompactSumKES signature.
@@ -56,25 +67,113 @@ object SumKES:
   ): Boolean =
     val maxPeriod = 1 << depth
     if period < 0 || period >= maxPeriod then return false
-    val expectedSize = signatureSize(depth)
-    if signature.size != expectedSize then return false
     if vk.size != 32 then return false
 
-    // Parse signature components
+    val stdSize     = standardSignatureSize(depth)
+    val compactSize = compactSignatureSize(depth)
+
+    if signature.size == stdSize && stdSize != compactSize then
+      verifyStandard(vk, period, message, signature, depth)
+    else if signature.size == compactSize && stdSize != compactSize then
+      verifyCompact(vk, period, message, signature, depth)
+    else if signature.size == stdSize then
+      // Sizes are equal (e.g. depth 1) — try both
+      verifyStandard(vk, period, message, signature, depth) ||
+        verifyCompact(vk, period, message, signature, depth)
+    else false
+
+  /**
+   * Verify a standard (wire format) SumKES signature.
+   *
+   * Standard format is recursive: SumKES_Sig(d) = (SumKES_Sig(d-1), leftVK(32), rightVK(32))
+   * Base case: Ed25519 sig (64 bytes).
+   *
+   * Total: 64 + d*64 = 64*(d+1) bytes.
+   * For Sum6KES: 448 bytes.
+   */
+  private def verifyStandard(
+      vk: ByteVector,
+      period: Int,
+      message: ByteVector,
+      signature: ByteVector,
+      depth: Int
+  ): Boolean =
+    // Parse the recursive structure bottom-up.
+    // The innermost (level 0) is just Ed25519 sig (64 bytes).
+    // Each outer level adds (leftVK, rightVK) = 64 bytes.
+    //
+    // Layout (reading from the end):
+    //   [ed25519_sig(64)] [vk_left_1(32), vk_right_1(32)] ... [vk_left_d(32), vk_right_d(32)]
+    val ed25519Sig = signature.take(64)
+
+    // Extract VK pairs at each level (1 to depth), stored after the Ed25519 sig
+    // Level i (1-indexed): offset = 64 + (i-1)*64, left = offset..offset+32, right = offset+32..offset+64
+    val vkPairs = (0 until depth).map { i =>
+      val offset = 64 + i.toLong * 64
+      val left   = signature.slice(offset, offset + 32)
+      val right  = signature.slice(offset + 32, offset + 64)
+      (left, right)
+    }
+
+    // At each level, determine which VK is the current subtree and which is the companion
+    // based on the period bit. Bit 0 is the innermost (leaf) level.
+    // bit=0 → left side active → leafVK is left, companion is right
+    // bit=1 → right side active → leafVK is right, companion is left
+    val (leafVk, companions) = {
+      val comps = new Array[ByteVector](depth)
+      var currentLeaf: ByteVector = null
+      for i <- 0 until depth do
+        val (left, right) = vkPairs(i)
+        val bit           = (period >> i) & 1
+        if i == 0 then
+          // Level 0: one of these is the leaf Ed25519 VK
+          if bit == 0 then { currentLeaf = left; comps(i) = right }
+          else { currentLeaf = right; comps(i) = left }
+        else
+          val bit = (period >> i) & 1
+          if bit == 0 then comps(i) = right
+          else comps(i) = left
+      (currentLeaf, comps.toIndexedSeq)
+    }
+
+    if leafVk == null then return false
+
+    // 1. Verify Ed25519 signature at the leaf
+    if !verifyEd25519(leafVk, message, ed25519Sig) then return false
+
+    // 2. Walk the tree from leaf to root
+    var currentHash = leafVk
+    for i <- 0 until depth do
+      val bit       = (period >> i) & 1
+      val companion = companions(i)
+      currentHash =
+        if bit == 0 then blake2b256(currentHash ++ companion)
+        else blake2b256(companion ++ currentHash)
+
+    // 3. Final hash must match the root VK
+    currentHash == vk
+
+  /**
+   * Verify a CompactSumKES signature.
+   *
+   * Compact format: ed25519_sig(64) + leafVK(32) + companion_0(32) + ... + companion_{d-1}(32)
+   * Total: 96 + 32*d bytes. For Sum6KES: 288 bytes.
+   */
+  private def verifyCompact(
+      vk: ByteVector,
+      period: Int,
+      message: ByteVector,
+      signature: ByteVector,
+      depth: Int
+  ): Boolean =
     val ed25519Sig = signature.take(64)
     val leafVk     = signature.slice(64, 96)
-    // Companion VKs: signature.slice(96, 96 + 32*depth)
     val companions = (0 until depth).map(i => signature.slice(96 + 32L * i, 96 + 32L * (i + 1)))
 
     // 1. Verify Ed25519 signature at the leaf
     if !verifyEd25519(leafVk, message, ed25519Sig) then return false
 
-    // 2. Walk the tree from leaf to root, checking hash at each level
-    // Companions are stored bottom-up: companions(0) = leaf-level sibling, companions(depth-1) = root-level sibling
-    // At each level i (0 = leaf, depth-1 = root):
-    //   - bit = (period >> i) & 1
-    //   - if bit == 0: current node is left child → parent = Blake2b-256(current || companion)
-    //   - if bit == 1: current node is right child → parent = Blake2b-256(companion || current)
+    // 2. Walk the tree from leaf to root
     var currentHash = leafVk
     for i <- 0 until depth do
       val bit       = (period >> i) & 1

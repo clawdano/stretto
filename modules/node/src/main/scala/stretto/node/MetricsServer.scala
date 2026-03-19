@@ -32,7 +32,11 @@ object MetricsServer:
       epoch: Long = 0L,
       n2nPeersConnected: Long = 0L,
       n2cClientsConnected: Long = 0L,
-      keepAliveRttMs: Long = 0L
+      keepAliveRttMs: Long = 0L,
+      headersValidated: Long = 0L,
+      headersPassed: Long = 0L,
+      headersFailed: Long = 0L,
+      validationErrorCounts: Map[String, Long] = Map.empty
   )
 
   /**
@@ -100,6 +104,19 @@ object MetricsServer:
       sb ++= s"# HELP stretto_sync_progress Sync progress (0.0 to 1.0)\n"
       sb ++= s"# TYPE stretto_sync_progress gauge\n"
       sb ++= s"""stretto_sync_progress{network="$network"} ${"%.6f".format(syncProgress)}\n"""
+
+      // --- Header validation metrics ---
+      sb ++= counter("stretto_headers_validated_total", "Total headers validated", m.headersValidated, network)
+      sb ++= counter("stretto_headers_passed_total", "Headers that passed validation", m.headersPassed, network)
+      sb ++= counter("stretto_headers_failed_total", "Headers that failed validation", m.headersFailed, network)
+
+      // Per-error-type counters
+      if m.validationErrorCounts.nonEmpty then
+        sb ++= s"# HELP stretto_validation_errors_total Validation errors by error type\n"
+        sb ++= s"# TYPE stretto_validation_errors_total counter\n"
+        m.validationErrorCounts.toList.sortBy(_._1).foreach { case (errorType, count) =>
+          sb ++= s"""stretto_validation_errors_total{network="$network",error="$errorType"} $count\n"""
+        }
 
       // Peer connections
       sb ++= gauge("stretto_n2n_peers_connected", "Connected N2N downstream peers", m.n2nPeersConnected, network)

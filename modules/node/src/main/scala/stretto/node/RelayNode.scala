@@ -69,8 +69,9 @@ object RelayNode:
           if config.metricsPort > 0
           then logger.info(s"Metrics: http://${config.listenHost}:${config.metricsPort}/metrics")
           else logger.info("Metrics server: disabled")
-        // Start upstream sync + optional listeners concurrently
+        // Create permissive header validator
         genesis = GenesisConfig.forNetwork(config.networkName)
+        headerValidator <- PermissiveHeaderValidator.create(metricsRef, genesis)
         n2nListener =
           if config.n2nListenPort > 0 then
             N2NListener.listen(
@@ -99,7 +100,8 @@ object RelayNode:
             MetricsServer.serve(config.listenHost, config.metricsPort, metricsRef, config.networkName)
           else IO.never[Nothing]
         // All fibers run forever (IO[Nothing]).
-        upstreamFiber <- upstreamSyncLoop(config, store, tipTopic, metricsRef).start
+        // Start upstream sync + optional listeners concurrently
+        upstreamFiber <- upstreamSyncLoop(config, store, tipTopic, metricsRef, headerValidator).start
         _             <- n2nListener.start
         _             <- n2cListener.start
         _             <- metricsServer.start
@@ -115,7 +117,8 @@ object RelayNode:
       config: Config,
       store: RocksDbStore,
       tipTopic: Topic[IO, ChainEvent],
-      metricsRef: Ref[IO, MetricsServer.Metrics]
+      metricsRef: Ref[IO, MetricsServer.Metrics],
+      headerValidator: PermissiveHeaderValidator
   ): IO[Nothing] =
     def syncOnce: IO[BlockSyncPipeline.SyncProgress] =
       BlockSyncPipeline.syncWithTopic(
@@ -126,6 +129,7 @@ object RelayNode:
         maxBlocks = 0L,
         tipTopic = tipTopic,
         keepAliveInterval = config.keepAliveInterval,
+        headerValidator = Some(headerValidator),
         onProgress = progress =>
           metricsRef.update(m =>
             m.copy(

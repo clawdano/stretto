@@ -11,6 +11,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Mux frame segmentation** — `MuxDemuxer.send`/`sendResponse` sent entire payloads in one frame. The mux wire format uses a 16-bit length field (max 65535 bytes); Shelley+ blocks exceeding 65KB caused length overflow and silent stream corruption. Fixed by segmenting large payloads across multiple frames under the write lock (receive-side reassembly already existed)
 - **BlockFetch/ChainSync server height lookup** — `findHeight` did a linear reverse scan capped at 10k blocks from tip; couldn't find older blocks. Added `point_to_height` RocksDB column family for O(1) point→height reverse lookups
 
+### Added
+- **Permissive consensus validation** — Ouroboros Praos header validation integrated into BlockSyncPipeline in fire-and-forget mode:
+  - `HeaderValidation.validateAll` — runs all 7 validation steps independently, collecting errors instead of short-circuiting
+  - `PermissiveHeaderValidator` — wraps consensus state management, epoch transitions, OCert counter tracking, nonce evolution
+  - `BlockDecoder.decodeHeaderOnly` — public header-only decoder for N2N era-wrapped headers
+  - Prometheus metrics: `stretto_headers_validated_total`, `stretto_headers_passed_total`, `stretto_headers_failed_total`, `stretto_validation_errors_total{error="..."}`
+  - Shelley genesis hashes added to `GenesisConfig` for mainnet, preprod, preview
+  - Verified: 4.5M preprod headers + 4.1M preview headers — all 3 crypto-independent checks (KES period, OCert signature, KES signature) pass on every header
+- **Standard Sum6KES verification** — `SumKES.verify` now handles both standard wire format (448 bytes) and compact format (288 bytes), auto-detecting by signature size
+
 ### Changed
 
 ### Added
